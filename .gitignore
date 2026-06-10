@@ -1,0 +1,11 @@
+.env
+.sap-mcp-session.json
+sap-mcp.yaml
+service-key.json
+logs/
+.pytest_cache/
+.tmp_download/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/

@@ -1,0 +1,19 @@
+server:
+  name: "SAP BTP Trial ABAP ADT MCP Server"
+  auth_tokens:
+    - "dev-token"
+
+abap_dev:
+  system_url: "https://your-abap-instance.abap.region.hana.ondemand.com"
+  callback_url: "http://localhost:8000/logon/success"
+  reentrance_endpoint: "/sap/bc/sec/reentrance"
+  reentrance_scenario: "FTO1"
+  service_key_path: "service-key.json"
+  session_path: ".sap-mcp-session.json"
+  readable_packages:
+    - "*"
+  allowed_packages:
+    - "Z*"
+  allow_write: false
+  allow_activate: false
+  default_timeout_seconds: 30
