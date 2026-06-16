@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import time
 import webbrowser
+from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from sap_mcp.config import AbapDevConfig
 from sap_mcp.errors import AuthorizationError, ConfigError, ValidationError
@@ -19,24 +20,29 @@ class BrowserSession:
     headers: dict[str, str]
     reentrance: dict[str, str]
     created_at: float
+    auth_mode: str = "sso"
 
 
 class BrowserSsoSessionManager:
     def __init__(self, config: AbapDevConfig):
         self.config = config
+        self._last_auto_login_opened_at = 0.0
+        self._last_auto_login_url: str | None = None
 
     def login_url(self) -> str:
         if self.config.sso_login_url:
             return self.config.sso_login_url
         system_url = self.system_url().rstrip("/")
         sso_url = system_url.replace(".abap.", ".abap-web.")
-        redirect_url = quote(self.config.callback_url, safe="")
         nonce = int(time.time() * 1000)
         endpoint = self.config.reentrance_endpoint
         separator = "&" if "?" in endpoint else "?"
+        params = {"redirect-url": self.config.callback_url, "_": str(nonce)}
+        if self.config.reentrance_scenario:
+            params["scenario"] = self.config.reentrance_scenario
         return (
             f"{sso_url}{endpoint}{separator}"
-            f"scenario={quote(self.config.reentrance_scenario, safe='')}&redirect-url={redirect_url}&_={nonce}"
+            f"{urlencode(params)}"
         )
 
     async def login(self) -> dict[str, Any]:
@@ -74,6 +80,26 @@ class BrowserSsoSessionManager:
             "session_path": str(self.config.session_path),
             "next_step": "Complete SSO in the browser. The local callback will capture the ADT login result.",
         }
+
+    def open_login_once(self, reason: str | None = None, *, cooldown_seconds: float = 120) -> dict[str, Any]:
+        now = time.time()
+        recently_opened = now - self._last_auto_login_opened_at < cooldown_seconds
+        if recently_opened and self._last_auto_login_url:
+            return {
+                "authentication_required": True,
+                "reused_session": False,
+                "browser_opened": False,
+                "reason": reason or "auto_login_required",
+                "login_url": self._last_auto_login_url,
+                "session_path": str(self.config.session_path),
+                "next_step": "A SSO login page was already opened recently. Complete that login, then retry the tool.",
+            }
+
+        result = self.open_login(reason or "auto_login_required")
+        self._last_auto_login_opened_at = now
+        self._last_auto_login_url = result["login_url"]
+        result["browser_opened"] = True
+        return result
 
     def save_session(self, cookies: dict[str, str], headers: dict[str, str] | None = None) -> dict[str, Any]:
         if not cookies:
@@ -142,6 +168,24 @@ class BrowserSsoSessionManager:
             headers={str(key): str(value) for key, value in headers.items()},
             reentrance={str(key): str(value) for key, value in reentrance.items()},
             created_at=float(data.get("created_at") or 0),
+            auth_mode=str(data.get("auth_mode") or "sso"),
+        )
+
+    def has_communication_user(self) -> bool:
+        return bool(self.config.communication_user and self.config.communication_password)
+
+    def communication_session(self) -> BrowserSession:
+        if not self.config.communication_user or not self.config.communication_password:
+            raise ConfigError("Communication user credentials are not configured")
+        raw = f"{self.config.communication_user}:{self.config.communication_password.get_secret_value()}"
+        token = b64encode(raw.encode("utf-8")).decode("ascii")
+        return BrowserSession(
+            system_url=self.system_url(),
+            cookies={},
+            headers={"Authorization": f"Basic {token}"},
+            reentrance={},
+            created_at=time.time(),
+            auth_mode="communication_user",
         )
 
     def _write_session(self, session: BrowserSession) -> None:
@@ -154,6 +198,7 @@ class BrowserSsoSessionManager:
                     "headers": session.headers,
                     "reentrance": session.reentrance,
                     "created_at": session.created_at,
+                    "auth_mode": session.auth_mode,
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -27,10 +27,12 @@ class ServerConfig(BaseModel):
 
 class AbapDevConfig(BaseModel):
     system_url: str | None = None
+    communication_user: str | None = None
+    communication_password: SecretStr | None = None
     sso_login_url: str | None = None
     callback_url: str = "http://localhost:8000/logon/success"
-    reentrance_endpoint: str = "/sap/bc/sec/reentrance"
-    reentrance_scenario: str = "FTO1"
+    reentrance_endpoint: str = "/sap/bc/adt/core/http/reentranceticket"
+    reentrance_scenario: str | None = None
     session_path: Path = Path(".sap-mcp-session.json")
     readable_packages: list[str] = Field(default_factory=lambda: ["*"])
     allowed_packages: list[str] = Field(default_factory=lambda: ["Z*"])

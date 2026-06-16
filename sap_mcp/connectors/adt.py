@@ -2,32 +2,26 @@ from __future__ import annotations
 
 import fnmatch
 import io
-import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
 from html import escape
 from typing import Any
-from urllib.parse import quote, urljoin
-
-import httpx
+from urllib.parse import quote
 
 from sap_mcp.auth.browser_sso import BrowserSession
 from sap_mcp.config import AbapDevConfig
-from sap_mcp.errors import AuthorizationError, ConfigError, SapBackendError, ValidationError
+from sap_mcp.connectors.adt_http import AdtHttpMixin
+from sap_mcp.connectors.adt_metadata import AdtMetadataMixin
+from sap_mcp.connectors.adt_paths import AdtPathMixin
+from sap_mcp.connectors.adt_quality import AdtQualityMixin
+from sap_mcp.connectors.adt_registry import (
+    ADT_ACCEPT,
+    AdtPathRegistration,
+    AdtResponse,
+)
+from sap_mcp.errors import AuthorizationError, SapBackendError, ValidationError
 
 
-ADT_ACCEPT = "application/atom+xml, application/xml, text/plain, */*"
-
-
-@dataclass(frozen=True)
-class AdtResponse:
-    status_code: int
-    text: str
-    headers: dict[str, str]
-    content_type: str
-
-
-class AdtConnector:
+class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin):
     def __init__(self, config: AbapDevConfig, session: BrowserSession):
         self.config = config
         self.session = session
@@ -109,21 +103,58 @@ class AdtConnector:
                     return source_matches[:max_results]
         return source_matches[:max_results]
 
-    async def read_source(self, object_type: str, name: str) -> dict[str, Any]:
-        path, source_kind = self._read_path(object_type, name)
+    async def read_source(
+        self,
+        object_type: str | None = None,
+        name: str | None = None,
+        scope: str | None = None,
+        include_type: str | None = None,
+        uri: str | None = None,
+    ) -> dict[str, Any]:
+        target = self._resolve_source_target(object_type, name, scope, include_type, uri)
+        path = target.uri
         response = await self._request("GET", path, accept="text/plain, application/xml, */*")
         result = {
-            "object_type": object_type,
-            "name": name.upper(),
+            "object_type": target.object_type,
+            "name": target.name,
             "source": response.text,
-            "source_kind": source_kind,
+            "source_kind": target.source_kind,
             "uri": path,
             "etag": response.headers.get("etag"),
             "content_type": response.content_type,
+            "scope": target.scope,
+            "include_type": target.include_type,
+            "round_trippable": target.round_trippable,
+            "writable_uri": path if target.round_trippable else None,
+            "writable_etag": response.headers.get("etag") if target.round_trippable else None,
         }
-        if self._is_oo_source_type(object_type) and source_kind == "source":
-            return await self._with_oo_source_includes(result, object_type, name, path, response)
+        if target.include_type:
+            result["source_part"] = target.include_type
+        if target.read_hint:
+            result["read_hint"] = target.read_hint
+        if self._is_oo_source_type(target.object_type) and target.source_kind == "source_with_includes":
+            return await self._with_oo_source_includes(result, target.object_type, target.name, path, response)
         return result
+
+    async def get_object_metadata(
+        self,
+        object_type: str | None = None,
+        name: str | None = None,
+        uri: str | None = None,
+    ) -> dict[str, Any]:
+        path = self._metadata_path(object_type, name, uri)
+        response = await self._request("GET", path, accept="application/xml, application/*, */*")
+        requested_type = object_type.upper() if object_type else None
+        requested_name = name.upper() if name else None
+        return self._parse_object_metadata(
+            response.text,
+            path,
+            response.headers.get("etag"),
+            response.content_type,
+            response.status_code,
+            requested_type,
+            requested_name,
+        )
 
     async def create_object(
         self,
@@ -136,41 +167,25 @@ class AdtConnector:
     ) -> dict[str, Any]:
         self._assert_write_allowed(reason)
         self._assert_package_allowed(package)
-        initial_source = source or self._default_source(object_type, name, description)
-        if object_type.lower() in {"prog", "program", "prog/p", "report"}:
-            return await self._create_metadata_object(
-                "PROG",
-                name,
-                package,
-                description,
-                "/sap/bc/adt/programs/programs",
-                "program:abapProgram",
-                'xmlns:program="http://www.sap.com/adt/programs/programs"',
-                "PROG/P",
-            )
-        if object_type.lower() in {"fugr", "function_group", "fugr/f"}:
-            return await self._create_metadata_object(
-                "FUGR",
-                name,
-                package,
-                description,
-                "/sap/bc/adt/functions/groups",
-                "group:abapFunctionGroup",
-                'xmlns:group="http://www.sap.com/adt/functions/groups"',
-                "FUGR/F",
-            )
-        if object_type.lower() in {"func", "function_module", "fugr/ff"}:
-            return await self._create_function_module(name, package, description, initial_source)
-        if object_type.lower() in {"dtel", "data_element"}:
-            return await self._create_data_element(name, package, description)
-        if object_type.lower() in {"doma", "domain"}:
-            return await self._create_domain(name, package, description)
-        if object_type.lower() in {"devc", "package"}:
-            return await self._create_package(name, package, description)
-        if object_type.lower() in {"ddls", "cds"}:
-            return await self._create_ddls(name, package, description, initial_source)
-        if object_type.lower() in {"srvb", "service_binding"}:
-            return await self._create_srvb(name, package, description, initial_source)
+        registration = self._path_registration(
+            object_type,
+            "Writable types are class, interface, ddls/cds, dcls/dcl, bdef, ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, fugr, and func",
+        )
+        initial_source = source if source is not None else self._initial_create_source(registration, name, description)
+        if registration.canonical_type in {"PROG", "FUGR"}:
+            return await self._create_metadata_object(registration, name, package, description)
+        if registration.canonical_type == "FUNC":
+            return await self._create_function_module(registration, name, package, description, initial_source)
+        if registration.canonical_type == "DTEL":
+            return await self._create_data_element(registration, name, package, description)
+        if registration.canonical_type == "DOMA":
+            return await self._create_domain(registration, name, package, description)
+        if registration.canonical_type == "DEVC":
+            return await self._create_package(registration, name, package, description)
+        if registration.canonical_type == "DDLS":
+            return await self._create_ddls(registration, name, package, description, initial_source)
+        if registration.canonical_type == "SRVB":
+            return await self._create_srvb(registration, name, package, description, initial_source)
         path = self._source_path(object_type, name)
         response = await self._request(
             "PUT",
@@ -184,16 +199,11 @@ class AdtConnector:
             },
             accept="application/xml, text/plain, */*",
         )
-        return {
-            "created": True,
-            "object_type": object_type,
-            "name": name.upper(),
-            "package": package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result(object_type, name, package, response)
 
-    async def _create_package(self, name: str, parent_package: str, description: str) -> dict[str, Any]:
+    async def _create_package(
+        self, registration: AdtPathRegistration, name: str, parent_package: str, description: str
+    ) -> dict[str, Any]:
         object_name = name.upper()
         metadata = (
             '<?xml version="1.0" encoding="UTF-8"?>'
@@ -201,13 +211,12 @@ class AdtConnector:
             'xmlns:adtcore="http://www.sap.com/adt/core" '
             f'adtcore:name="{object_name}" adtcore:type="DEVC/K" '
             f'adtcore:description="{self._xml_escape(description)}">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(parent_package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{parent_package.upper()}"/>'
+            f"{self._package_ref_xml(parent_package)}"
             "</package:package>"
         )
         response = await self._request(
             "POST",
-            "/sap/bc/adt/packages",
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/vnd.sap.adt.package.v2+xml; charset=utf-8",
@@ -216,41 +225,31 @@ class AdtConnector:
             },
             accept="application/vnd.sap.adt.package.v2+xml, application/xml, */*",
         )
-        return {
-            "created": True,
-            "object_type": "DEVC",
-            "name": object_name,
-            "package": parent_package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result("DEVC", object_name, parent_package, response)
 
     async def _create_metadata_object(
         self,
-        object_type: str,
+        registration: AdtPathRegistration,
         name: str,
         package: str,
         description: str,
-        collection_path: str,
-        xml_name: str,
-        xml_namespace: str,
-        adt_type: str,
     ) -> dict[str, Any]:
+        if not registration.create_xml_name or not registration.create_xml_namespace or not registration.create_adt_type:
+            raise ValidationError(f"{registration.display_name} does not define metadata creation XML")
         object_name = name.upper()
         metadata = (
             '<?xml version="1.0" encoding="UTF-8"?>'
-            f"<{xml_name} {xml_namespace} "
+            f"<{registration.create_xml_name} {registration.create_xml_namespace} "
             'xmlns:adtcore="http://www.sap.com/adt/core" '
-            f'adtcore:name="{object_name}" adtcore:type="{adt_type}" '
+            f'adtcore:name="{object_name}" adtcore:type="{registration.create_adt_type}" '
             f'adtcore:description="{self._xml_escape(description)}" '
             'adtcore:abapLanguageVersion="cloudDevelopment">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{package.upper()}"/>'
-            f"</{xml_name}>"
+            f"{self._package_ref_xml(package)}"
+            f"</{registration.create_xml_name}>"
         )
         response = await self._request(
             "POST",
-            collection_path,
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/xml; charset=utf-8",
@@ -259,16 +258,11 @@ class AdtConnector:
             },
             accept="application/xml, application/*, */*",
         )
-        return {
-            "created": True,
-            "object_type": object_type,
-            "name": object_name,
-            "package": package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result(registration.canonical_type, object_name, package, response)
 
-    async def _create_domain(self, name: str, package: str, description: str) -> dict[str, Any]:
+    async def _create_domain(
+        self, registration: AdtPathRegistration, name: str, package: str, description: str
+    ) -> dict[str, Any]:
         object_name = name.upper()
         label = self._xml_escape(description)
         metadata = (
@@ -277,8 +271,7 @@ class AdtConnector:
             'xmlns:adtcore="http://www.sap.com/adt/core" '
             f'adtcore:name="{object_name}" adtcore:type="DOMA/DM" '
             f'adtcore:description="{label}" adtcore:abapLanguageVersion="cloudDevelopment">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{package.upper()}"/>'
+            f"{self._package_ref_xml(package)}"
             '<doma:domain xmlns:doma="http://www.sap.com/adt/dictionary/domains">'
             "<doma:dataType>CHAR</doma:dataType><doma:dataTypeLength>000001</doma:dataTypeLength>"
             "<doma:dataTypeDecimals>000000</doma:dataTypeDecimals>"
@@ -287,7 +280,7 @@ class AdtConnector:
         )
         response = await self._request(
             "POST",
-            "/sap/bc/adt/ddic/domains",
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/vnd.sap.adt.domains.v2+xml; charset=utf-8",
@@ -296,17 +289,10 @@ class AdtConnector:
             },
             accept="application/vnd.sap.adt.domains.v2+xml, application/xml, */*",
         )
-        return {
-            "created": True,
-            "object_type": "DOMA",
-            "name": object_name,
-            "package": package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result("DOMA", object_name, package, response)
 
     async def _create_function_module(
-        self, name: str, package: str, description: str, function_group: str
+        self, registration: AdtPathRegistration, name: str, package: str, description: str, function_group: str
     ) -> dict[str, Any]:
         object_name = name.upper()
         group_name = function_group.strip().upper()
@@ -325,22 +311,16 @@ class AdtConnector:
         )
         response = await self._request(
             "POST",
-            f"/sap/bc/adt/functions/groups/{quote(group_name.lower())}/fmodules",
+            self._collection_path(registration, name),
             content=metadata.encode("utf-8"),
             headers={"Content-Type": "application/xml; charset=utf-8"},
             accept="application/xml, application/*, */*",
         )
-        return {
-            "created": True,
-            "object_type": "FUNC",
-            "name": object_name,
-            "function_group": group_name,
-            "package": package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result("FUNC", object_name, package, response, function_group=group_name)
 
-    async def _create_data_element(self, name: str, package: str, description: str) -> dict[str, Any]:
+    async def _create_data_element(
+        self, registration: AdtPathRegistration, name: str, package: str, description: str
+    ) -> dict[str, Any]:
         object_name = name.upper()
         label = self._xml_escape(description)
         metadata = (
@@ -349,8 +329,7 @@ class AdtConnector:
             'xmlns:adtcore="http://www.sap.com/adt/core" '
             f'adtcore:name="{object_name}" adtcore:type="DTEL/DE" '
             f'adtcore:description="{label}" adtcore:abapLanguageVersion="cloudDevelopment">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{package.upper()}"/>'
+            f"{self._package_ref_xml(package)}"
             '<dtel:dataElement xmlns:dtel="http://www.sap.com/adt/dictionary/dataelements">'
             "<dtel:typeKind>predefinedAbapType</dtel:typeKind><dtel:typeName/>"
             "<dtel:dataType>CHAR</dtel:dataType><dtel:dataTypeLength>000001</dtel:dataTypeLength>"
@@ -366,7 +345,7 @@ class AdtConnector:
         )
         response = await self._request(
             "POST",
-            "/sap/bc/adt/ddic/dataelements",
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/vnd.sap.adt.dataelements.v2+xml; charset=utf-8",
@@ -375,18 +354,12 @@ class AdtConnector:
             },
             accept="application/vnd.sap.adt.dataelements.v2+xml, application/xml, */*",
         )
-        return {
-            "created": True,
-            "object_type": "DTEL",
-            "name": object_name,
-            "package": package.upper(),
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
+        return self._created_result("DTEL", object_name, package, response)
 
-    async def _create_ddls(self, name: str, package: str, description: str, source: str) -> dict[str, Any]:
+    async def _create_ddls(
+        self, registration: AdtPathRegistration, name: str, package: str, description: str, source: str
+    ) -> dict[str, Any]:
         object_name = name.upper()
-        normalized_name = quote(name.lower())
         metadata = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<ddl:ddlSource xmlns:ddl="http://www.sap.com/adt/ddic/ddlsources" '
@@ -397,13 +370,12 @@ class AdtConnector:
             'adtcore:abapLanguageVersion="cloudDevelopment" '
             'ddl:source_origin="0" ddl:source_type="view entity" '
             'abapsource:sourceUri="source/main">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{package.upper()}"/>'
+            f"{self._package_ref_xml(package)}"
             "</ddl:ddlSource>"
         )
         create_response = await self._request(
             "POST",
-            "/sap/bc/adt/ddic/ddl/sources",
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/vnd.sap.adt.ddlSource+xml; charset=utf-8",
@@ -414,7 +386,7 @@ class AdtConnector:
         )
         source_response = await self._request(
             "PUT",
-            f"/sap/bc/adt/ddic/ddl/sources/{normalized_name}/source/main",
+            self._source_path(registration.canonical_type, name),
             content=source.encode("utf-8"),
             headers={
                 "If-Match": create_response.headers.get("etag", "*"),
@@ -422,16 +394,11 @@ class AdtConnector:
             },
             accept="application/xml, text/plain, */*",
         )
-        return {
-            "created": True,
-            "object_type": "DDLS",
-            "name": object_name,
-            "package": package.upper(),
-            "status_code": source_response.status_code,
-            "etag": source_response.headers.get("etag"),
-        }
+        return self._created_result("DDLS", object_name, package, source_response)
 
-    async def _create_srvb(self, name: str, package: str, description: str, service_definition: str) -> dict[str, Any]:
+    async def _create_srvb(
+        self, registration: AdtPathRegistration, name: str, package: str, description: str, service_definition: str
+    ) -> dict[str, Any]:
         object_name = name.upper()
         service_definition_name = (service_definition or name).strip().upper()
         metadata = (
@@ -442,8 +409,7 @@ class AdtConnector:
             f'adtcore:name="{object_name}" adtcore:type="SRVB/SVB" '
             f'adtcore:description="{self._xml_escape(description)}" '
             'adtcore:abapLanguageVersion="cloudDevelopment">'
-            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{quote(package.lower())}" '
-            f'adtcore:type="DEVC/K" adtcore:name="{package.upper()}"/>'
+            f"{self._package_ref_xml(package)}"
             f'<srvb:services srvb:name="{object_name}">'
             '<srvb:content srvb:version="0001" srvb:minorVersion="0" srvb:patchVersion="0" '
             'srvb:buildVersion="" srvb:releaseState="NOT_RELEASED">'
@@ -457,7 +423,7 @@ class AdtConnector:
         )
         response = await self._request(
             "POST",
-            "/sap/bc/adt/businessservices/bindings",
+            self._collection_path(registration),
             content=metadata.encode("utf-8"),
             headers={
                 "Content-Type": "application/vnd.sap.adt.businessservices.servicebinding.v2+xml; charset=utf-8",
@@ -466,47 +432,93 @@ class AdtConnector:
             },
             accept="application/vnd.sap.adt.businessservices.servicebinding.v2+xml, application/xml, */*",
         )
-        return {
-            "created": True,
-            "object_type": "SRVB",
-            "name": object_name,
-            "package": package.upper(),
-            "service_definition": service_definition_name,
-            "status_code": response.status_code,
-            "etag": response.headers.get("etag"),
-        }
-
-    async def update_source(self, object_type: str, name: str, source: str, etag: str, reason: str) -> dict[str, Any]:
-        self._assert_write_allowed(reason)
-        await self._assert_object_write_allowed(object_type, name)
-        path = self._source_path(object_type, name)
-        content_type = "application/xml; charset=utf-8" if self._is_metadata_write_path(path) else "text/plain; charset=utf-8"
-        response = await self._request(
-            "PUT",
-            path,
-            content=source.encode("utf-8"),
-            headers={"If-Match": etag, "Content-Type": content_type},
-            accept="application/xml, text/plain, */*",
+        return self._created_result(
+            "SRVB",
+            object_name,
+            package,
+            response,
+            service_definition=service_definition_name,
         )
+
+    async def update_source(
+        self,
+        object_type: str | None,
+        name: str | None,
+        source: str,
+        etag: str,
+        reason: str,
+        include_type: str | None = None,
+        uri: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_write_allowed(reason)
+        requested_scope = "include" if include_type else None
+        target = self._resolve_source_target(object_type, name, requested_scope, include_type, uri, for_write=True)
+        if not target.round_trippable:
+            raise ValidationError(
+                "This source target is read-only or not directly writable through abap_update_source. "
+                f"{target.read_hint or ''}".strip()
+            )
+        if '"$ADT include:' in source:
+            raise ValidationError(
+                "Composite source_with_includes output is not round-trippable. Read the exact main/include part first "
+                f"and write back using its writable_uri/writable_etag. {target.read_hint or ''}".strip()
+            )
+        await self._assert_object_write_allowed(target.object_type, target.name)
+        path = target.uri
+        content_type = "application/xml; charset=utf-8" if self._is_metadata_write_path(path) else "text/plain; charset=utf-8"
+        try:
+            response = await self._request(
+                "PUT",
+                path,
+                content=source.encode("utf-8"),
+                headers={"If-Match": etag, "Content-Type": content_type},
+                accept="application/xml, text/plain, */*",
+            )
+        except SapBackendError as error:
+            raise self._augment_update_error(error, target) from error
         return {
             "updated": True,
-            "object_type": object_type,
-            "name": name.upper(),
+            "object_type": target.object_type,
+            "name": target.name,
+            "uri": path,
+            "include_type": target.include_type,
             "status_code": response.status_code,
             "etag": response.headers.get("etag"),
+            "writable_uri": path,
+            "writable_etag": response.headers.get("etag"),
         }
 
     async def activate_object(self, object_type: str, name: str, reason: str) -> dict[str, Any]:
+        result = await self.activate_objects([{"type": object_type, "name": name}], reason)
+        return {"activated": True, "object_type": object_type, "name": name.upper(), "status_code": result["status_code"]}
+
+    async def activate_objects(self, objects: list[dict[str, str]], reason: str) -> dict[str, Any]:
         if not self.config.allow_activate:
             raise AuthorizationError("ABAP activation is disabled by configuration")
         if not reason.strip():
             raise ValidationError("Activation reason is required")
-        await self._assert_object_write_allowed(object_type, name)
-        uri = self._source_path(object_type, name).rsplit("/source/main", 1)[0]
+
+        references = []
+        for item in objects or []:
+            object_type = (item.get("type") or item.get("object_type") or "").strip()
+            name = (item.get("name") or "").strip()
+            if not object_type or not name:
+                raise ValidationError("Each object must contain name and type/object_type")
+            uri = self._object_path(object_type, name)
+            await self._assert_object_write_allowed(object_type, name)
+            references.append({"object_type": object_type.upper(), "name": name.upper(), "uri": uri})
+
+        if not references:
+            raise ValidationError("At least one object is required")
+
+        object_reference_xml = "".join(
+            f'<adtcore:objectReference adtcore:uri="{self._xml_escape(reference["uri"])}" />'
+            for reference in references
+        )
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">'
-            f'<adtcore:objectReference adtcore:uri="{uri}" />'
+            f"{object_reference_xml}"
             "</adtcore:objectReferences>"
         )
         response = await self._request(
@@ -516,7 +528,7 @@ class AdtConnector:
             content=body.encode("utf-8"),
             headers={"Content-Type": "application/xml"},
         )
-        return {"activated": True, "object_type": object_type, "name": name.upper(), "status_code": response.status_code}
+        return {"activated": True, "count": len(references), "objects": references, "status_code": response.status_code}
 
     async def delete_object(self, object_type: str, name: str, reason: str) -> dict[str, Any]:
         self._assert_write_allowed(reason)
@@ -590,227 +602,47 @@ class AdtConnector:
             "messages": status,
         }
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, str] | None = None,
-        headers: dict[str, str] | None = None,
-        accept: str = ADT_ACCEPT,
-        content: bytes | None = None,
-    ) -> AdtResponse:
-        merged_headers = {
-            "Accept": accept,
-            "User-Agent": "sap-mcp-adt/0.1",
-            **self._reentrance_headers(),
-            **self.session.headers,
-            **(headers or {}),
-        }
-        if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-            merged_headers.setdefault("X-CSRF-Token", await self._csrf_token())
 
-        async with httpx.AsyncClient(timeout=self.config.default_timeout_seconds, cookies=self.session.cookies) as client:
-            response = await client.request(
-                method,
-                f"{self.session.system_url.rstrip('/')}/{path.lstrip('/')}",
-                params=params,
-                headers=merged_headers,
-                content=content,
-                follow_redirects=False,
-            )
-            self._merge_cookies(client.cookies)
-        if response.status_code in {401, 403}:
-            raise AuthorizationError(
-                f"ADT session is not authorized or has expired. SAP returned {response.status_code}; run abap_adt_login again."
-            )
-        if response.status_code in {301, 302, 303, 307, 308}:
-            location = response.headers.get("location", "SSO login")
-            raise AuthorizationError(
-                f"ADT session is not authorized or has expired. SAP redirected to {location}; run abap_adt_login again."
-            )
-        if response.status_code >= 400:
-            raise SapBackendError(f"ADT error {response.status_code}: {response.text[:500]}")
-        return AdtResponse(
-            status_code=response.status_code,
-            text=response.text,
-            headers=dict(response.headers),
-            content_type=response.headers.get("content-type", ""),
-        )
 
-    async def _csrf_token(self) -> str:
-        async with httpx.AsyncClient(timeout=self.config.default_timeout_seconds, cookies=self.session.cookies) as client:
-            response = await client.get(
-                f"{self.session.system_url.rstrip('/')}/sap/bc/adt/discovery",
-                headers={"X-CSRF-Token": "Fetch", "Accept": ADT_ACCEPT, **self._reentrance_headers(), **self.session.headers},
-                follow_redirects=False,
-            )
-        if response.status_code in {401, 403}:
-            raise AuthorizationError("Cannot fetch ADT CSRF token; SSO session is not authorized or has expired")
-        if response.status_code in {301, 302, 303, 307, 308}:
-            raise AuthorizationError("Cannot fetch ADT CSRF token; SAP redirected to SSO login")
-        token = response.headers.get("x-csrf-token")
-        if not token:
-            raise SapBackendError("ADT did not return an X-CSRF-Token")
-        return token
 
-    def _reentrance_headers(self) -> dict[str, str]:
-        params = self.session.reentrance
-        if not params:
-            return {}
-        headers: dict[str, str] = {}
-        for key in ("httpHeader", "http-header", "header"):
-            value = params.get(key)
-            if value and ":" in value:
-                name, _, header_value = value.partition(":")
-                headers[name.strip()] = header_value.strip()
-        for key in ("reentranceTicket", "reentrance-ticket", "ticket", "assertionTicket", "assertion-ticket"):
-            value = params.get(key)
-            if value:
-                headers.setdefault("X-sap-adt-reentrance-ticket", value)
-                headers.setdefault("SAP-ADT-ReentranceTicket", value)
-                headers.setdefault("MYSAPSSO2", value)
-                headers.setdefault("x-sap-security-session", "create")
-        return headers
 
-    def _merge_cookies(self, cookies: httpx.Cookies) -> None:
-        for cookie in cookies.jar:
-            self.session.cookies[cookie.name] = cookie.value
 
-    def _persist_session_cookies(self) -> None:
-        if not self.config.session_path.exists() or not self.session.cookies:
-            return
-        import json
 
-        data = json.loads(self.config.session_path.read_text(encoding="utf-8"))
-        data["cookies"] = self.session.cookies
-        self.config.session_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _source_path(self, object_type: str, name: str) -> str:
-        normalized_type = object_type.lower()
-        normalized_name = quote(name.lower())
-        if normalized_type in {"class", "clas"}:
-            return f"/sap/bc/adt/oo/classes/{normalized_name}/source/main"
-        if normalized_type in {"interface", "intf"}:
-            return f"/sap/bc/adt/oo/interfaces/{normalized_name}/source/main"
-        if normalized_type in {"ddls", "cds"}:
-            return f"/sap/bc/adt/ddic/ddl/sources/{normalized_name}/source/main"
-        if normalized_type in {"dcls", "dcl"}:
-            return f"/sap/bc/adt/acm/dcl/sources/{normalized_name}/source/main"
-        if normalized_type in {"bdef", "behavior", "behavior_definition"}:
-            return f"/sap/bc/adt/bo/behaviordefinitions/{normalized_name}/source/main"
-        if normalized_type in {"ddlx", "metadata_extension"}:
-            return f"/sap/bc/adt/ddic/ddlx/sources/{normalized_name}/source/main"
-        if normalized_type in {"srvd", "service_definition"}:
-            return f"/sap/bc/adt/ddic/srvd/sources/{normalized_name}/source/main"
-        if normalized_type in {"tabl", "table"}:
-            return f"/sap/bc/adt/ddic/tables/{normalized_name}/source/main"
-        if normalized_type in {"dtel", "data_element"}:
-            return f"/sap/bc/adt/ddic/dataelements/{normalized_name}"
-        if normalized_type in {"doma", "domain"}:
-            return f"/sap/bc/adt/ddic/domains/{normalized_name}"
-        if normalized_type in {"devc", "package"}:
-            return f"/sap/bc/adt/packages/{normalized_name}"
-        if normalized_type in {"srvb", "service_binding"}:
-            return f"/sap/bc/adt/businessservices/bindings/{normalized_name}"
-        if normalized_type in {"prog", "program", "prog/p", "report"}:
-            return f"/sap/bc/adt/programs/programs/{normalized_name}/source/main"
-        if normalized_type in {"fugr", "function_group", "fugr/f"}:
-            return f"/sap/bc/adt/functions/groups/{normalized_name}/source/main"
-        if normalized_type in {"func", "function_module", "fugr/ff"}:
-            group_name, function_name = self._function_module_parts(name)
-            return f"/sap/bc/adt/functions/groups/{quote(group_name.lower())}/fmodules/{quote(function_name.lower())}/source/main"
-        raise ValidationError(
-            "Writable types are class, interface, ddls/cds, dcls/dcl, bdef, ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, fugr, and func"
-        )
 
-    def _object_path(self, object_type: str, name: str) -> str:
-        source_path = self._source_path(object_type, name)
-        return source_path.rsplit("/source/main", 1)[0]
 
-    def _read_path(self, object_type: str, name: str) -> tuple[str, str]:
-        normalized_type = object_type.lower().split("/", 1)[0]
-        source_part = self._oo_source_part(object_type)
-        normalized_name = quote(name.lower())
-        if normalized_type in {"class", "clas"}:
-            if source_part == "metadata":
-                return f"/sap/bc/adt/oo/classes/{normalized_name}", "metadata"
-            if source_part == "texts":
-                return f"/sap/bc/adt/textelements/classes/{normalized_name}", "metadata"
-            return f"/sap/bc/adt/oo/classes/{normalized_name}/{source_part}", "source"
-        if normalized_type in {"interface", "intf"}:
-            if source_part == "metadata":
-                return f"/sap/bc/adt/oo/interfaces/{normalized_name}", "metadata"
-            if source_part == "texts":
-                return f"/sap/bc/adt/textelements/interfaces/{normalized_name}", "metadata"
-            return f"/sap/bc/adt/oo/interfaces/{normalized_name}/{source_part}", "source"
-        if normalized_type in {"ddls", "cds"}:
-            return f"/sap/bc/adt/ddic/ddl/sources/{normalized_name}/source/main", "source"
-        if normalized_type in {"dcls", "dcl"}:
-            return f"/sap/bc/adt/acm/dcl/sources/{normalized_name}/source/main", "source"
-        if normalized_type in {"bdef", "behavior", "behavior_definition"}:
-            return f"/sap/bc/adt/bo/behaviordefinitions/{normalized_name}/source/main", "source"
-        if normalized_type in {"ddlx", "metadata_extension"}:
-            return f"/sap/bc/adt/ddic/ddlx/sources/{normalized_name}/source/main", "source"
-        if normalized_type in {"srvd", "service_definition"}:
-            return f"/sap/bc/adt/ddic/srvd/sources/{normalized_name}/source/main", "source"
-        if normalized_type in {"tabl", "table"}:
-            return f"/sap/bc/adt/ddic/tables/{normalized_name}/source/main", "source"
-        if normalized_type in {"dtel", "data_element"}:
-            return f"/sap/bc/adt/ddic/dataelements/{normalized_name}", "metadata"
-        if normalized_type in {"doma", "domain"}:
-            return f"/sap/bc/adt/ddic/domains/{normalized_name}", "metadata"
-        if normalized_type in {"devc", "package"}:
-            return f"/sap/bc/adt/packages/{normalized_name}", "metadata"
-        if normalized_type in {"srvb", "service_binding"}:
-            return f"/sap/bc/adt/businessservices/bindings/{normalized_name}", "metadata"
-        if normalized_type in {"prog", "program", "prog/p", "report"}:
-            return f"/sap/bc/adt/programs/programs/{normalized_name}/source/main", "source"
-        if normalized_type in {"fugr", "function_group", "fugr/f"}:
-            return f"/sap/bc/adt/functions/groups/{normalized_name}", "metadata"
-        if normalized_type in {"func", "function_module", "fugr/ff"}:
-            group_name, function_name = self._function_module_parts(name)
-            return f"/sap/bc/adt/functions/groups/{quote(group_name.lower())}/fmodules/{quote(function_name.lower())}/source/main", "source"
-        raise ValidationError(
-            "Supported read types are class, interface, ddls/cds, dcls/dcl, bdef, ddlx, srvd, tabl, dtel, doma, devc, srvb, prog, fugr, and func"
-        )
 
-    def _is_oo_source_type(self, object_type: str) -> bool:
-        normalized_type = object_type.lower().split("/", 1)[0]
-        return normalized_type in {"class", "clas", "interface", "intf"}
 
-    def _is_source_search_type(self, object_type: str) -> bool:
-        normalized_type = object_type.lower().split("/", 1)[0]
-        return normalized_type in {
-            "class",
-            "clas",
-            "interface",
-            "intf",
-            "ddls",
-            "cds",
-            "dcls",
-            "dcl",
-            "bdef",
-            "behavior",
-            "behavior_definition",
-            "ddlx",
-            "metadata_extension",
-            "srvd",
-            "service_definition",
-            "tabl",
-            "table",
-            "dtel",
-            "data_element",
-            "doma",
-            "domain",
-            "prog",
-            "program",
-            "report",
-            "fugr",
-            "function_group",
-            "func",
-            "function_module",
-        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     async def _is_large_super_package(self, package: str) -> bool:
         try:
@@ -835,31 +667,6 @@ class AdtConnector:
                     return True
         return False
 
-    def _oo_source_part(self, object_type: str) -> str:
-        parts = object_type.lower().split("/")
-        if len(parts) < 2:
-            return "source/main"
-        requested = parts[-1].replace("-", "_")
-        include_parts = {
-            "main": "source/main",
-            "source": "source/main",
-            "definitions": "includes/definitions",
-            "definition": "includes/definitions",
-            "local_definitions": "includes/definitions",
-            "implementations": "includes/implementations",
-            "implementation": "includes/implementations",
-            "local_implementations": "includes/implementations",
-            "macros": "includes/macros",
-            "testclasses": "includes/testclasses",
-            "test_classes": "includes/testclasses",
-            "tests": "includes/testclasses",
-            "metadata": "metadata",
-            "json": "metadata",
-            "texts": "texts",
-            "textelements": "texts",
-            "text_elements": "texts",
-        }
-        return include_parts.get(requested, "source/main")
 
     async def _with_oo_source_includes(
         self,
@@ -885,6 +692,11 @@ class AdtConnector:
                 "source": main_response.text,
                 "etag": main_response.headers.get("etag"),
                 "content_type": main_response.content_type,
+                "scope": "main",
+                "source_kind": "source",
+                "round_trippable": True,
+                "writable_uri": main_path,
+                "writable_etag": main_response.headers.get("etag"),
             }
         ]
         for include in includes:
@@ -900,6 +712,11 @@ class AdtConnector:
                     "source": include_response.text,
                     "etag": include_response.headers.get("etag", include.get("etag")),
                     "content_type": include_response.content_type,
+                    "scope": "include",
+                    "source_kind": "source",
+                    "round_trippable": True,
+                    "writable_uri": include["uri"],
+                    "writable_etag": include_response.headers.get("etag", include.get("etag")),
                 }
             )
 
@@ -907,6 +724,11 @@ class AdtConnector:
             return result
 
         result["source_kind"] = "source_with_includes"
+        result["scope"] = "with_includes"
+        result["round_trippable"] = False
+        result["writable_uri"] = None
+        result["writable_etag"] = None
+        result["read_hint"] = self._build_read_hint(result["object_type"], result["name"], "include", "implementations")
         result["source_parts"] = parts
         result["includes"] = [
             {key: value for key, value in part.items() if key != "source"}
@@ -953,10 +775,6 @@ class AdtConnector:
         order = {"main": 0, "definitions": 1, "implementations": 2, "macros": 3, "testclasses": 4}
         return sorted(includes, key=lambda item: order.get(item["include_type"], 99))
 
-    def _adt_relative_url(self, base_path: str, href: str) -> str:
-        if href.startswith("/"):
-            return href
-        return "/" + urljoin(base_path.lstrip("/"), href).lstrip("/")
 
     def _format_source_part(self, part: dict[str, Any]) -> str:
         include_type = part["include_type"]
@@ -1001,6 +819,13 @@ class AdtConnector:
                     }
                 )
         return matches
+
+
+
+
+
+
+
 
     def _default_source(self, object_type: str, name: str, description: str) -> str:
         normalized_type = object_type.lower()
@@ -1081,40 +906,11 @@ class AdtConnector:
         self._assert_package_allowed(package)
 
     async def _object_package(self, object_type: str, name: str) -> str | None:
-        normalized_type = object_type.lower().split("/", 1)[0]
+        registration = self._find_path_registration(object_type)
         search_name = name
-        if normalized_type in {"func", "function_module"}:
+        if registration and registration.canonical_type == "FUNC":
             search_name, _ = self._function_module_parts(name)
-        search_type = {
-            "class": "CLAS",
-            "clas": "CLAS",
-            "interface": "INTF",
-            "intf": "INTF",
-            "ddls": "DDLS",
-            "cds": "DDLS",
-            "bdef": "BDEF",
-            "behavior": "BDEF",
-            "behavior_definition": "BDEF",
-            "ddlx": "DDLX",
-            "metadata_extension": "DDLX",
-            "srvd": "SRVD",
-            "service_definition": "SRVD",
-            "tabl": "TABL",
-            "table": "TABL",
-            "dtel": "DTEL",
-            "data_element": "DTEL",
-            "doma": "DOMA",
-            "domain": "DOMA",
-            "srvb": "SRVB",
-            "service_binding": "SRVB",
-            "prog": "PROG",
-            "program": "PROG",
-            "report": "PROG",
-            "fugr": "FUGR",
-            "function_group": "FUGR",
-            "func": "FUGR",
-            "function_module": "FUGR",
-        }.get(normalized_type, object_type.upper().split("/", 1)[0])
+        search_type = registration.search_type if registration else object_type.upper().split("/", 1)[0]
         try:
             results = await self._search_repository_objects(search_name, 20, search_type, None)
         except Exception:
@@ -1125,13 +921,6 @@ class AdtConnector:
                 return item["packageName"]
         return None
 
-    def _function_module_parts(self, name: str) -> tuple[str, str]:
-        if "/" not in name:
-            raise ValidationError("Function module source paths require name in FUNCTION_GROUP/FUNCTION_MODULE format")
-        group_name, function_name = name.split("/", 1)
-        if not group_name.strip() or not function_name.strip():
-            raise ValidationError("Function module source paths require name in FUNCTION_GROUP/FUNCTION_MODULE format")
-        return group_name.strip().upper(), function_name.strip().upper()
 
     def _parse_search_results(self, text: str) -> list[dict[str, Any]]:
         if not text.strip():
@@ -1180,28 +969,28 @@ class AdtConnector:
     def _xml_escape(self, value: str) -> str:
         return escape(value, quote=True)
 
-    def _is_metadata_write_path(self, path: str) -> bool:
-        return not path.endswith("/source/main")
+    def _package_ref_xml(self, package: str) -> str:
+        package_name = package.upper()
+        package_uri = quote(package.lower())
+        return (
+            f'<adtcore:packageRef adtcore:uri="/sap/bc/adt/packages/{package_uri}" '
+            f'adtcore:type="DEVC/K" adtcore:name="{package_name}"/>'
+        )
 
-    def _server_etag_from_precondition(self, message: str) -> str | None:
-        match = re.search(r"does not match the object ETag ([^\s<]+)", message)
-        return match.group(1) if match else None
-
-    def _parse_status_messages(self, text: str) -> list[dict[str, str]]:
-        if not text.strip():
-            return []
-        try:
-            root = ET.fromstring(text)
-        except ET.ParseError:
-            return [{"text": text}]
-        messages: list[dict[str, str]] = []
-        for element in root.iter():
-            tag = element.tag.rsplit("}", 1)[-1].lower()
-            if tag not in {"message", "statusmessage", "status"}:
-                continue
-            item = {self._clean_xml_name(key).lower(): value for key, value in element.attrib.items()}
-            if element.text and element.text.strip():
-                item["text"] = element.text.strip()
-            if item:
-                messages.append(item)
-        return messages
+    def _created_result(
+        self,
+        object_type: str,
+        name: str,
+        package: str,
+        response: AdtResponse,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "created": True,
+            "object_type": object_type,
+            "name": name.upper(),
+            **extra,
+            "package": package.upper(),
+            "status_code": response.status_code,
+            "etag": response.headers.get("etag"),
+        }

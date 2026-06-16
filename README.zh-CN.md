@@ -1,72 +1,46 @@
 # SAP BTP ABAP ADT MCP Server
 
-这是一个基于 Python、FastMCP 和 ADT HTTP API 的 SAP ABAP MCP 服务端。
+这是一个通过 ADT HTTP API 操作 SAP ABAP Development Tools 的 MCP 服务端。
 
-## 当前能力
+## 功能
 
-- 浏览器 SSO 登录 ADT
-- ABAP Repository 搜索
-- 源码和元数据读取
-- 受控创建、修改、激活、删除
-- OData V4 Service Binding 发布
-- HTTP 和 STDIO 两种 MCP Transport
+- 浏览器 SSO 登录 ADT。
+- ABAP Repository 搜索。
+- 源码和元数据读取。
+- 受控创建、更新、激活、发布和删除。
+- 通过官方 REST 服务运行 ABAP Unit 和 ATC。
+- 支持 HTTP 和 STDIO 两种 Transport。
 
 ## 运行要求
 
 - Python 3.11+
-- 目标 SAP ABAP 系统已启用 ADT
-- 可以通过浏览器完成 SAP SSO
-- 对需要修改的对象具备后端开发权限
+- 已启用 ADT 的 SAP ABAP 系统
+- 可以通过浏览器完成目标系统 SSO
+- 可选：用于 ABAP Unit（`SAP_COM_0735`）和 ATC（`SAP_COM_0901`）的 Communication User
 
-## 项目结构
-
-- `sap_mcp/`：MCP 服务端源码。
-  - `server.py`：HTTP Transport 入口。
-  - `stdio_server.py`：STDIO Transport 入口，适合 Kiro 等 IDE 启动。
-  - `callback.py`：共享的 SSO 回调路由。
-  - `auth/`、`connectors/`、`services/`：认证、ADT 请求和工具编排。
-- `sap-mcp.example.yaml`：安全的示例配置。
-- `sap-mcp.yaml`：本地私有配置，保存 `abap_dev.system_url` 和写入权限等设置。
-- `.sap-mcp-session.json`：本地浏览器 SSO 会话文件，不要提交或分享。
-
-## 配置
-
-复制示例配置：
+## 安装
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install -e .
 copy sap-mcp.example.yaml sap-mcp.yaml
 ```
 
-示例：
+编辑 `sap-mcp.yaml`，至少配置：
 
-```yaml
-server:
-  name: "SAP BTP Trial ABAP ADT MCP Server"
-  auth_tokens:
-    - "dev-token"
+- `abap_dev.system_url`
+- `allowed_packages`
+- `allow_write` / `allow_activate`
+- 如需 ABAP Unit 或 ATC，配置 `communication_user` / `communication_password`
 
-abap_dev:
-  system_url: "https://your-abap-instance.abap.region.hana.ondemand.com"
-  callback_url: "http://localhost:8000/logon/success"
-  reentrance_endpoint: "/sap/bc/sec/reentrance"
-  reentrance_scenario: "FTO1"
-  session_path: ".sap-mcp-session.json"
-  readable_packages:
-    - "*"
-  allowed_packages:
-    - "Z*"
-  allow_write: false
-  allow_activate: false
-  default_timeout_seconds: 30
-```
-
-请在 `abap_dev.system_url` 中直接配置 SAP ABAP 系统地址。不要分发 `.sap-mcp-session.json`、`.env` 或真实的 `sap-mcp.yaml`。
+不要提交或分享 `sap-mcp.yaml`、`.env`、`.sap-mcp-session.json`。
 
 ## 启动
 
 HTTP：
 
 ```powershell
+$env:SAP_MCP_AUTH_TOKENS="dev-token"
 uvicorn sap_mcp.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -76,33 +50,32 @@ STDIO：
 python -m sap_mcp.stdio_server
 ```
 
-STDIO 模式会同时启动一个本地 SSO 回调监听器，监听地址来自 `abap_dev.callback_url`。
+HTTP 端点：
 
-## MCP Tools
+- `/mcp`
+- `/healthz`
+- `/logon/success`
 
-- `abap_adt_login`
-- `abap_save_sso_session`
-- `abap_save_sso_cookie_header`
-- `abap_adt_connect`
-- `abap_search_objects`
-- `abap_read_source`
-- `abap_create_object`
-- `abap_update_source`
-- `abap_activate_object`
-- `abap_delete_object`
-- `abap_publish_service_binding`
+## MCP 工具
 
-## 当前支持范围
+- 登录与连接：`abap_adt_login`、`abap_adt_connect`、`abap_save_sso_session`、`abap_save_sso_cookie_header`
+- 读取：`abap_search_objects`、`abap_read_source`、`abap_get_object_metadata`
+- 写入：`abap_create_object`、`abap_update_source`、`abap_activate_object`、`abap_activate_objects`、`abap_delete_object`、`abap_publish_service_binding`
+- 质量检查：`abap_run_unit_tests`、`abap_get_unit_test_run`、`abap_get_unit_test_result`、`abap_run_atc_checks`、`abap_get_atc_run`、`abap_get_atc_result`
+
+## 支持对象
 
 - `CLAS`、`INTF`
 - `DDLS`、`DCLS`、`BDEF`、`DDLX`、`SRVD`、`SRVB`
 - `TABL`、`DTEL`、`DOMA`、`DEVC`
 - `PROG`、`FUGR`、`FUNC`
 
+创建、更新、激活、发布和删除操作受 `allowed_packages` 限制。SAP 后端授权仍然生效。
+
 ## 登录流程
 
 1. 调用 `abap_adt_login`。
 2. 在浏览器中完成 SAP SSO。
-3. `/logon/success` 回调保存 `.sap-mcp-session.json`。
-4. 调用 `abap_adt_connect` 验证连接。
-5. 建议先读后写，只有确实需要时再开启 `allow_write` 和 `allow_activate`。
+3. 回调保存本地 ADT 会话。
+4. 调用 `abap_adt_connect`。
+5. 建议先读后写，只在需要时开启写入和激活。

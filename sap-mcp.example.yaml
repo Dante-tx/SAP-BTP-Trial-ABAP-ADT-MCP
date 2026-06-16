@@ -5,14 +5,23 @@ server:
 
 abap_dev:
   system_url: "https://your-abap-instance.abap.region.hana.ondemand.com"
+  # Optional. Prefer this for official ABAP Unit / ATC REST services.
+  # ABAP Unit requires SAP_COM_0735; ATC requires SAP_COM_0901.
+  communication_user: null
+  communication_password: null
   callback_url: "http://localhost:8000/logon/success"
-  reentrance_endpoint: "/sap/bc/sec/reentrance"
-  reentrance_scenario: "FTO1"
+  reentrance_endpoint: "/sap/bc/adt/core/http/reentranceticket"
+  reentrance_scenario: null
   session_path: ".sap-mcp-session.json"
   readable_packages:
     - "*"
+  # ADT object/source/read/create path rules are built in; configure only package access here.
+  # abap_get_object_metadata is read-only and uses the same ADT object path rules.
+  # ADT error classification for ETag, CSRF, session expiry, and SAP XML messages is built in.
   allowed_packages:
     - "Z*"
   allow_write: false
+  # Enables abap_activate_object and abap_activate_objects.
   allow_activate: false
+  # ABAP Unit / ATC success may require SAP_COM_0735 and SAP_COM_0901 communication arrangements.
   default_timeout_seconds: 30
