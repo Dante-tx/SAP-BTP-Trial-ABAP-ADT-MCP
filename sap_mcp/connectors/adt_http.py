@@ -35,7 +35,7 @@ class AdtHttpMixin:
             response = await client.request(
                 method,
                 f"{self.session.system_url.rstrip('/')}/{path.lstrip('/')}",
-                params=params,
+                params=self._client_params(params),
                 headers=merged_headers,
                 content=content,
                 follow_redirects=False,
@@ -60,6 +60,7 @@ class AdtHttpMixin:
         async with httpx.AsyncClient(timeout=self.config.default_timeout_seconds, cookies=self.session.cookies) as client:
             response = await client.get(
                 f"{self.session.system_url.rstrip('/')}/sap/bc/adt/discovery",
+                params=self._client_params(),
                 headers={"X-CSRF-Token": "Fetch", "Accept": ADT_ACCEPT, **self._reentrance_headers(), **self.session.headers},
                 follow_redirects=False,
             )
@@ -170,6 +171,14 @@ class AdtHttpMixin:
                 headers.setdefault("MYSAPSSO2", value)
                 headers.setdefault("x-sap-security-session", "create")
         return headers
+
+    def _client_params(self, params: dict[str, str] | None = None) -> dict[str, str] | None:
+        client = self.config.client
+        if not client:
+            return params
+        merged = dict(params or {})
+        merged.setdefault("sap-client", client)
+        return merged
 
     def _merge_cookies(self, cookies: httpx.Cookies) -> None:
         for cookie in cookies.jar:

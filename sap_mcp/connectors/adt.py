@@ -13,6 +13,7 @@ from sap_mcp.connectors.adt_http import AdtHttpMixin
 from sap_mcp.connectors.adt_metadata import AdtMetadataMixin
 from sap_mcp.connectors.adt_paths import AdtPathMixin
 from sap_mcp.connectors.adt_quality import AdtQualityMixin
+from sap_mcp.connectors.official import AdtOfficialCompatibilityMixin
 from sap_mcp.connectors.adt_registry import (
     ADT_ACCEPT,
     AdtPathRegistration,
@@ -21,7 +22,7 @@ from sap_mcp.connectors.adt_registry import (
 from sap_mcp.errors import AuthorizationError, SapBackendError, ValidationError
 
 
-class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin):
+class AdtConnector(AdtOfficialCompatibilityMixin, AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin):
     def __init__(self, config: AbapDevConfig, session: BrowserSession):
         self.config = config
         self.session = session
@@ -164,6 +165,7 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
         description: str,
         reason: str,
         source: str | None = None,
+        service_binding_version: str | None = None,
     ) -> dict[str, Any]:
         self._assert_write_allowed(reason)
         self._assert_package_allowed(package)
@@ -185,7 +187,14 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
         if registration.canonical_type == "DDLS":
             return await self._create_ddls(registration, name, package, description, initial_source)
         if registration.canonical_type == "SRVB":
-            return await self._create_srvb(registration, name, package, description, initial_source)
+            return await self._create_srvb(
+                registration,
+                name,
+                package,
+                description,
+                initial_source,
+                service_binding_version,
+            )
         path = self._source_path(object_type, name)
         response = await self._request(
             "PUT",
@@ -397,10 +406,17 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
         return self._created_result("DDLS", object_name, package, source_response)
 
     async def _create_srvb(
-        self, registration: AdtPathRegistration, name: str, package: str, description: str, service_definition: str
+        self,
+        registration: AdtPathRegistration,
+        name: str,
+        package: str,
+        description: str,
+        service_definition: str,
+        service_binding_version: str | None = None,
     ) -> dict[str, Any]:
         object_name = name.upper()
         service_definition_name = (service_definition or name).strip().upper()
+        odata_version = self._normalize_odata_version(service_binding_version, default="V4")
         metadata = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<srvb:serviceBinding xmlns:srvb="http://www.sap.com/adt/ddic/ServiceBindings" '
@@ -417,7 +433,7 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
             f'adtcore:type="SRVD/SRV" adtcore:name="{service_definition_name}"/>'
             '<srvb:bindingTypeData><adtcore:content adtcore:encoding="base64"/></srvb:bindingTypeData>'
             '</srvb:content></srvb:services>'
-            '<srvb:binding srvb:type="ODATA" srvb:version="V4" srvb:category="0">'
+            f'<srvb:binding srvb:type="ODATA" srvb:version="{odata_version}" srvb:category="0">'
             f'<srvb:implementation adtcore:name="{object_name}"/>'
             '</srvb:binding></srvb:serviceBinding>'
         )
@@ -438,6 +454,7 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
             package,
             response,
             service_definition=service_definition_name,
+            odata_version=odata_version,
         )
 
     async def update_source(
@@ -490,7 +507,19 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
 
     async def activate_object(self, object_type: str, name: str, reason: str) -> dict[str, Any]:
         result = await self.activate_objects([{"type": object_type, "name": name}], reason)
-        return {"activated": True, "object_type": object_type, "name": name.upper(), "status_code": result["status_code"]}
+        # Extract per-object result for the requested object from parsed activation response
+        activated = result.get("activated", True)
+        obj_results = result.get("object_results", [])
+        my_result = obj_results[0] if obj_results else {}
+        return {
+            "activated": activated,
+            "object_type": object_type,
+            "name": name.upper(),
+            "status_code": result["status_code"],
+            "activation_state": my_result.get("state"),
+            "activation_state_text": my_result.get("state_text"),
+            "messages": my_result.get("messages", []),
+        }
 
     async def activate_objects(self, objects: list[dict[str, str]], reason: str) -> dict[str, Any]:
         if not self.config.allow_activate:
@@ -528,7 +557,102 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
             content=body.encode("utf-8"),
             headers={"Content-Type": "application/xml"},
         )
-        return {"activated": True, "count": len(references), "objects": references, "status_code": response.status_code}
+        # Parse activation response XML to check actual backend results
+        object_results, all_activated = self._parse_activation_result(response.text, references)
+        return {
+            "activated": all_activated,
+            "count": len(references),
+            "objects": references,
+            "object_results": object_results,
+            "messages": [message for result in object_results for message in result["messages"]],
+            "status_code": response.status_code,
+        }
+
+    def _parse_activation_result(
+        self, xml_text: str, references: list[dict[str, str]]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        try:
+            root = ET.fromstring(xml_text)
+        except (ET.ParseError, TypeError):
+            return self._activation_fallback_results(references, "Could not parse activation result")
+
+        messages = [
+            self._activation_message(element)
+            for element in root.iter()
+            if self._xml_local_name(element.tag) in {"msg", "message"}
+        ]
+        messages = [message for message in messages if message]
+        error_types = {"A", "E", "X", "ERROR"}
+        has_errors = any(
+            (message.get("type") or message.get("severity") or "").upper() in error_types
+            for message in messages
+        )
+        has_failed_state = any(
+            (element.attrib.get("state") or self._activation_attr(element, "state")).upper() in error_types
+            for element in root.iter()
+        )
+        activation_executed = not any(
+            self._xml_local_name(element.tag) == "properties"
+            and (element.attrib.get("activationExecuted") or "").lower() == "false"
+            for element in root.iter()
+        )
+        all_activated = activation_executed and not has_errors and not has_failed_state
+        state = "S" if all_activated else "E"
+        state_text = "Activated" if all_activated else "Activation failed"
+
+        object_results = []
+        for ref in references:
+            related_messages = [
+                message for message in messages
+                if len(references) == 1
+                or ref["uri"] in (message.get("href") or "")
+                or ref["name"] in (message.get("objDescr") or "").upper()
+            ]
+            object_results.append({
+                "object_type": ref["object_type"],
+                "name": ref["name"],
+                "state": state,
+                "state_text": state_text,
+                "activated": all_activated and not any(
+                    (message.get("type") or "").upper() in error_types for message in related_messages
+                ),
+                "messages": related_messages,
+            })
+
+        return object_results, all(result["activated"] for result in object_results)
+
+    def _activation_fallback_results(
+        self, references: list[dict[str, str]], state_text: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        return [
+            {
+                "object_type": ref["object_type"],
+                "name": ref["name"],
+                "state": "UNKNOWN",
+                "state_text": state_text,
+                "activated": False,
+                "messages": [],
+            }
+            for ref in references
+        ], False
+
+    def _activation_message(self, element: ET.Element) -> dict[str, str]:
+        message = {self._xml_local_name(key): value for key, value in element.attrib.items()}
+        text_parts = []
+        if element.text and element.text.strip():
+            text_parts.append(element.text.strip())
+        for child in element.iter():
+            if child is not element and child.text and child.text.strip():
+                text_parts.append(child.text.strip())
+        if text_parts:
+            message["text"] = " ".join(text_parts)
+        return message
+
+    def _activation_attr(self, element: ET.Element, name: str) -> str:
+        return next((value for key, value in element.attrib.items() if self._xml_local_name(key) == name), "")
+
+    def _xml_local_name(self, name: str) -> str:
+        return name.rsplit("}", 1)[-1].split(":", 1)[-1]
 
     async def delete_object(self, object_type: str, name: str, reason: str) -> dict[str, Any]:
         self._assert_write_allowed(reason)
@@ -555,23 +679,33 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
             )
         return {"deleted": True, "object_type": object_type, "name": name.upper(), "status_code": response.status_code}
 
-    async def publish_service_binding(self, name: str, reason: str) -> dict[str, Any]:
+    async def publish_service_binding(
+        self, name: str, reason: str, odata_version: str | None = None
+    ) -> dict[str, Any]:
         self._assert_write_allowed(reason)
         if not reason.strip():
             raise ValidationError("Publish reason is required")
         await self._assert_object_write_allowed("SRVB", name)
         object_name = name.upper()
         metadata = await self.read_source("SRVB", object_name)
-        if 'published="true"' in metadata["source"]:
+        detected_version = self._service_binding_odata_version(metadata["source"], default=None)
+        version = self._normalize_odata_version(odata_version or detected_version, default="V4")
+        if odata_version and detected_version and version != detected_version:
+            raise ValidationError(
+                f"Service binding {object_name} is {detected_version}; requested publish version was {version}"
+            )
+        odata_path = f"odata{version.lower()}"
+        if self._service_binding_published(metadata["source"]):
             return {
                 "published": True,
                 "changed": False,
                 "object_type": "SRVB",
                 "name": object_name,
+                "odata_version": version,
                 "status_code": metadata.get("status_code", 200),
             }
 
-        uri = f"/sap/bc/adt/businessservices/odatav4/{quote(object_name)}?servicename={quote(object_name)}"
+        uri = f"/sap/bc/adt/businessservices/{odata_path}/{quote(object_name)}?servicename={quote(object_name)}"
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">'
@@ -582,7 +716,7 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
         )
         response = await self._request(
             "POST",
-            "/sap/bc/adt/businessservices/odatav4/publishjobs",
+            f"/sap/bc/adt/businessservices/{odata_path}/publishjobs",
             params={"servicename": object_name},
             content=body.encode("utf-8"),
             headers={"Content-Type": "application/xml; charset=utf-8"},
@@ -598,9 +732,51 @@ class AdtConnector(AdtHttpMixin, AdtQualityMixin, AdtMetadataMixin, AdtPathMixin
             "changed": True,
             "object_type": "SRVB",
             "name": object_name,
+            "odata_version": version,
             "status_code": response.status_code,
             "messages": status,
         }
+
+    def _normalize_odata_version(self, version: str | None, default: str | None = "V4") -> str:
+        raw_value = version or default
+        if not raw_value:
+            raise ValidationError("OData version must be V2 or V4")
+        raw = raw_value.strip().upper()
+        raw = raw.replace("ODATA", "").replace("\\", "").replace("/", "").strip()
+        if raw in {"2", "V2"}:
+            return "V2"
+        if raw in {"4", "V4"}:
+            return "V4"
+        raise ValidationError("OData version must be V2 or V4")
+
+    def _service_binding_odata_version(self, text: str, default: str | None = "V4") -> str | None:
+        try:
+            root = ET.fromstring(text)
+        except (ET.ParseError, TypeError):
+            lower_text = (text or "").lower()
+            if "odatav2" in lower_text or "odata\\v2" in lower_text or 'version="v2"' in lower_text:
+                return "V2"
+            if "odatav4" in lower_text or "odata\\v4" in lower_text or 'version="v4"' in lower_text:
+                return "V4"
+            return self._normalize_odata_version(default) if default else None
+        for element in root.iter():
+            if self._xml_local_name(element.tag) == "binding":
+                attrs = {self._xml_local_name(key): value for key, value in element.attrib.items()}
+                if attrs.get("version"):
+                    return self._normalize_odata_version(attrs["version"], default=default)
+        return self._normalize_odata_version(default) if default else None
+
+    def _service_binding_published(self, text: str) -> bool:
+        try:
+            root = ET.fromstring(text)
+        except (ET.ParseError, TypeError):
+            lower_text = (text or "").lower()
+            return 'published="true"' in lower_text or "published='true'" in lower_text
+        for element in root.iter():
+            attrs = {self._xml_local_name(key): value for key, value in element.attrib.items()}
+            if attrs.get("published", "").lower() == "true" or attrs.get("bindingCreated", "").lower() == "true":
+                return True
+        return False
 
 
 

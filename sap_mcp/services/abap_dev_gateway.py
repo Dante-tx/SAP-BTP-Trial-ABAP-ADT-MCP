@@ -8,12 +8,13 @@ from sap_mcp.config import AbapDevConfig
 from sap_mcp.connectors.adt import AdtConnector
 from sap_mcp.errors import AuthorizationError, ConfigError
 from sap_mcp.security import UserContext, authorize_tool
+from sap_mcp.services.official_gateway import OfficialGatewayMixin
 
 
 T = TypeVar("T")
 
 
-class AbapDevGateway:
+class AbapDevGateway(OfficialGatewayMixin):
     def __init__(self, config: AbapDevConfig):
         self.config = config
         self.sessions = BrowserSsoSessionManager(config)
@@ -93,11 +94,20 @@ class AbapDevGateway:
         description: str,
         reason: str,
         source: str | None = None,
+        service_binding_version: str | None = None,
     ) -> dict[str, Any]:
         return await self._run_with_connector(
             user,
             "abap_create_object",
-            lambda connector: connector.create_object(object_type, name, package, description, reason, source),
+            lambda connector: connector.create_object(
+                object_type,
+                name,
+                package,
+                description,
+                reason,
+                source,
+                service_binding_version,
+            ),
             expired_message="The saved SSO session expired while creating the ABAP object.",
             write=True,
         )
@@ -148,11 +158,13 @@ class AbapDevGateway:
             write=True,
         )
 
-    async def publish_service_binding(self, user: UserContext, name: str, reason: str) -> dict[str, Any]:
+    async def publish_service_binding(
+        self, user: UserContext, name: str, reason: str, odata_version: str | None = None
+    ) -> dict[str, Any]:
         return await self._run_with_connector(
             user,
             "abap_publish_service_binding",
-            lambda connector: connector.publish_service_binding(name, reason),
+            lambda connector: connector.publish_service_binding(name, reason, odata_version),
             expired_message="The saved SSO session expired while publishing the service binding.",
             write=True,
         )
@@ -244,21 +256,25 @@ class AbapDevGateway:
             raise self._login_required_error(expired_message or "The saved SSO session expired.") from exc
 
     async def _authenticated_connector(self) -> tuple[AdtConnector, dict[str, Any]]:
-        if self.sessions.has_communication_user():
-            session = self.sessions.communication_session()
-            connector = AdtConnector(self.config, session)
-            discovery = await connector.discovery()
-            return connector, discovery
-
         try:
-            session = self.sessions.load_session()
+            session = self.sessions.authenticated_session()
         except ConfigError as exc:
+            if self.config.auth_mode == "basic":
+                raise AuthorizationError(
+                    "Basic ADT credentials are not configured. Set abap_dev.username/password "
+                    "or legacy communication_user/communication_password."
+                ) from exc
             raise self._login_required_error("No usable local SSO session was found.") from exc
 
         connector = AdtConnector(self.config, session)
         try:
             discovery = await connector.discovery()
         except AuthorizationError as exc:
+            if session.auth_mode == "basic":
+                raise AuthorizationError(
+                    "Basic ADT authentication failed. Check abap_dev.username/password "
+                    "or legacy communication_user/communication_password, and confirm the SAP system allows Basic Auth for ADT."
+                ) from exc
             raise self._login_required_error("The saved SSO session is not authorized or has expired.") from exc
         return connector, discovery
 
@@ -271,9 +287,9 @@ class AbapDevGateway:
         )
 
     def _quality_auth_error(self, action: str) -> AuthorizationError:
-        if self.sessions.has_communication_user():
+        if self.sessions.should_use_basic_auth():
             return AuthorizationError(
-                f"Communication user authentication failed while {action}. Check SAP_COM_0735 for ABAP Unit, "
-                f"SAP_COM_0901 for ATC, and the configured user authorizations."
+                f"Basic ADT authentication failed while {action}. Check SAP_COM_0735 for ABAP Unit, "
+                f"SAP_COM_0901 for ATC if applicable, and the configured user authorizations."
             )
         return self._login_required_error(f"The saved SSO session expired while {action}.")

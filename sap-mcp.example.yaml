@@ -5,7 +5,16 @@ server:
 
 abap_dev:
   system_url: "https://your-abap-instance.abap.region.hana.ondemand.com"
-  # Optional. Prefer this for official ABAP Unit / ATC REST services.
+  # Optional SAP client, for example "100". Sent as sap-client on ADT requests.
+  client: null
+  # Authentication mode: sso, basic, or auto.
+  # - sso opens the browser-assisted ADT login flow.
+  # - basic uses username/password for HTTP Basic Auth against ADT.
+  # - auto uses basic when credentials are configured, otherwise sso.
+  auth_mode: "sso"
+  username: null
+  password: null
+  # Legacy aliases for username/password. Kept for compatibility.
   # ABAP Unit requires SAP_COM_0735; ATC requires SAP_COM_0901.
   communication_user: null
   communication_password: null

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from pydantic import SecretStr
+
 from sap_mcp.config import AbapDevConfig
 from sap_mcp.errors import AuthorizationError, ConfigError, ValidationError
 
@@ -38,6 +40,8 @@ class BrowserSsoSessionManager:
         endpoint = self.config.reentrance_endpoint
         separator = "&" if "?" in endpoint else "?"
         params = {"redirect-url": self.config.callback_url, "_": str(nonce)}
+        if self.config.client:
+            params["sap-client"] = self.config.client
         if self.config.reentrance_scenario:
             params["scenario"] = self.config.reentrance_scenario
         return (
@@ -46,6 +50,21 @@ class BrowserSsoSessionManager:
         )
 
     async def login(self) -> dict[str, Any]:
+        if self.should_use_basic_auth():
+            try:
+                discovery = await self.validate_session(self.basic_auth_session())
+            except (AuthorizationError, ConfigError) as exc:
+                raise AuthorizationError(
+                    "Basic ADT authentication failed. Check abap_dev.username/password "
+                    "or legacy communication_user/communication_password, and confirm the SAP system allows Basic Auth for ADT."
+                ) from exc
+            return {
+                **discovery,
+                "reused_session": False,
+                "authentication_required": False,
+                "auth_mode": "basic",
+            }
+
         try:
             session = self.load_session()
         except ConfigError:
@@ -68,6 +87,11 @@ class BrowserSsoSessionManager:
 
         connector = AdtConnector(self.config, session or self.load_session())
         return await connector.discovery()
+
+    def authenticated_session(self) -> BrowserSession:
+        if self.should_use_basic_auth():
+            return self.basic_auth_session()
+        return self.load_session()
 
     def open_login(self, reason: str | None = None) -> dict[str, Any]:
         url = self.login_url()
@@ -172,12 +196,27 @@ class BrowserSsoSessionManager:
         )
 
     def has_communication_user(self) -> bool:
-        return bool(self.config.communication_user and self.config.communication_password)
+        return self.has_basic_credentials()
+
+    def has_basic_credentials(self) -> bool:
+        return bool(self._basic_username() and self._basic_password())
+
+    def should_use_basic_auth(self) -> bool:
+        if self.config.auth_mode == "basic":
+            return True
+        if self.config.auth_mode == "auto":
+            return self.has_basic_credentials()
+        return False
 
     def communication_session(self) -> BrowserSession:
-        if not self.config.communication_user or not self.config.communication_password:
-            raise ConfigError("Communication user credentials are not configured")
-        raw = f"{self.config.communication_user}:{self.config.communication_password.get_secret_value()}"
+        return self.basic_auth_session()
+
+    def basic_auth_session(self) -> BrowserSession:
+        username = self._basic_username()
+        password = self._basic_password()
+        if not username or not password:
+            raise ConfigError("Basic ADT credentials are not configured")
+        raw = f"{username}:{password.get_secret_value()}"
         token = b64encode(raw.encode("utf-8")).decode("ascii")
         return BrowserSession(
             system_url=self.system_url(),
@@ -185,8 +224,14 @@ class BrowserSsoSessionManager:
             headers={"Authorization": f"Basic {token}"},
             reentrance={},
             created_at=time.time(),
-            auth_mode="communication_user",
+            auth_mode="basic",
         )
+
+    def _basic_username(self) -> str | None:
+        return self.config.username or self.config.communication_user
+
+    def _basic_password(self) -> SecretStr | None:
+        return self.config.password or self.config.communication_password
 
     def _write_session(self, session: BrowserSession) -> None:
         self.config.session_path.parent.mkdir(parents=True, exist_ok=True)

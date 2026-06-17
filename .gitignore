@@ -1,4 +1,4 @@
-.env
+﻿.env
 .sap-mcp-session.json
 sap-mcp.yaml
 logs/
@@ -6,3 +6,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.pytest_cache/
+tests/
+test_*.py

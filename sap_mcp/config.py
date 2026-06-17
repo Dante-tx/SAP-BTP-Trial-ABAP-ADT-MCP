@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -27,6 +27,10 @@ class ServerConfig(BaseModel):
 
 class AbapDevConfig(BaseModel):
     system_url: str | None = None
+    client: str | None = None
+    auth_mode: Literal["sso", "basic", "auto"] = "auto"
+    username: str | None = None
+    password: SecretStr | None = None
     communication_user: str | None = None
     communication_password: SecretStr | None = None
     sso_login_url: str | None = None

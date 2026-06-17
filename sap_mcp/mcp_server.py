@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from sap_mcp.config import AppConfig, get_config
 from sap_mcp.security import SYSTEM_USER
 from sap_mcp.services.abap_dev_gateway import AbapDevGateway
+from sap_mcp.tools.official import register_official_tools
 
 
 def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) -> FastMCP:
@@ -33,6 +34,8 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
     async def abap_adt_connect() -> dict[str, Any]:
         """Validate that the saved SSO session can access ABAP ADT discovery."""
         return await abap_gateway.connect(SYSTEM_USER)
+
+    register_official_tools(mcp, abap_gateway)
 
     @mcp.tool()
     async def abap_search_objects(
@@ -72,9 +75,19 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
         description: str,
         reason: str,
         source: str | None = None,
+        service_binding_version: str | None = None,
     ) -> dict[str, Any]:
         """Create an ABAP class or interface through ADT."""
-        return await abap_gateway.create_object(SYSTEM_USER, object_type, name, package, description, reason, source)
+        return await abap_gateway.create_object(
+            SYSTEM_USER,
+            object_type,
+            name,
+            package,
+            description,
+            reason,
+            source,
+            service_binding_version,
+        )
 
     @mcp.tool()
     async def abap_update_source(
@@ -105,9 +118,11 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
         return await abap_gateway.delete_object(SYSTEM_USER, object_type, name, reason)
 
     @mcp.tool()
-    async def abap_publish_service_binding(name: str, reason: str) -> dict[str, Any]:
-        """Publish an OData V4 ABAP service binding through ADT."""
-        return await abap_gateway.publish_service_binding(SYSTEM_USER, name, reason)
+    async def abap_publish_service_binding(
+        name: str, reason: str, odata_version: str | None = None
+    ) -> dict[str, Any]:
+        """Publish an OData V2 or V4 ABAP service binding through ADT."""
+        return await abap_gateway.publish_service_binding(SYSTEM_USER, name, reason, odata_version)
 
     @mcp.tool()
     async def abap_run_unit_tests(
