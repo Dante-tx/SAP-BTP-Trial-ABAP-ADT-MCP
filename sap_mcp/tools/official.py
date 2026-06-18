@@ -125,15 +125,18 @@ def register_official_tools(mcp: FastMCP, abap_gateway: AbapDevGateway) -> None:
     @mcp.tool(name="abap_business_services-fetch_service_information")
     async def abap_business_services_fetch_service_information(
         serviceBindingName: str,
-        serviceName: str,
-        serviceDefinition: str,
-        serviceVersion: str,
-        odataInfoUri: str,
-        odataVersion: str,
         destination: str,
+        serviceName: str | None = None,
+        serviceDefinition: str | None = None,
+        serviceVersion: str | None = None,
+        odataInfoUri: str | None = None,
+        odataVersion: str | None = None,
         isPublished: bool | None = None,
     ) -> dict[str, Any]:
-        """Fetch runtime URL, entity sets, and navigation details for an OData service."""
+        """Fetch runtime URL, entity sets, and navigation details for an OData service.
+
+        When service details are omitted, they are derived from the service binding metadata.
+        """
         return await abap_gateway.business_services_fetch_service_information(
             SYSTEM_USER,
             destination,

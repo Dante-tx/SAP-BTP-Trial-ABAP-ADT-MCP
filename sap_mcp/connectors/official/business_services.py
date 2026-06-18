@@ -23,18 +23,56 @@ class BusinessServicesMixin(OfficialBaseMixin):
         self,
         destination: str,
         service_binding_name: str,
-        service_name: str,
-        service_definition: str,
-        service_version: str,
-        odata_info_uri: str,
-        odata_version: str,
+        service_name: str | None = None,
+        service_definition: str | None = None,
+        service_version: str | None = None,
+        odata_info_uri: str | None = None,
+        odata_version: str | None = None,
         is_published: bool | None = None,
     ) -> dict[str, Any]:
         self._assert_destination(destination)
+        if not all([service_name, service_definition, service_version, odata_info_uri, odata_version]):
+            binding = await self.business_services_fetch_services(destination, service_binding_name)
+            service = self._first_service(binding, service_binding_name)
+            content = self._first_service_content(service)
+            service_name = service_name or service.get("name") or service_binding_name
+            service_definition = service_definition or content.get("serviceDefinition") or ""
+            service_version = service_version or content.get("serviceVersion") or "0001"
+            odata_info_uri = odata_info_uri or self._first_odata_info_uri(binding, service_binding_name)
+            odata_version = odata_version or binding.get("odataVersion") or "V4"
+            if is_published is None:
+                is_published = bool(binding.get("isPublished"))
+        odata_info_uri = self._service_info_uri_with_service_name(odata_info_uri, service_binding_name)
         if odata_version.upper() == "V4" and is_published is False:
             raise ValidationError(f"Service binding {service_binding_name} is not published")
         response = await self._request("GET", odata_info_uri, accept="application/xml, application/json, */*")
         return self._parse_odata_service_information(response.text, odata_info_uri, service_name, service_definition, service_version)
+
+    def _first_service(self, binding: dict[str, Any], service_binding_name: str) -> dict[str, Any]:
+        services = binding.get("services") or []
+        if services and isinstance(services[0], dict):
+            return services[0]
+        return {"name": service_binding_name, "content": [{"serviceDefinition": "", "serviceVersion": "0001"}]}
+
+    def _first_service_content(self, service: dict[str, Any]) -> dict[str, str]:
+        content = service.get("content") or []
+        if content and isinstance(content[0], dict):
+            return content[0]
+        return {"serviceDefinition": "", "serviceVersion": "0001"}
+
+    def _first_odata_info_uri(self, binding: dict[str, Any], service_binding_name: str) -> str:
+        uris = binding.get("odataInfoUri") or []
+        if uris and isinstance(uris[0], dict) and uris[0].get("href"):
+            return uris[0]["href"]
+        odata_path = "odatav2" if binding.get("odataVersion") == "V2" else "odatav4"
+        return f"/sap/bc/adt/businessservices/{odata_path}/{quote(service_binding_name.lower())}"
+
+    def _service_info_uri_with_service_name(self, uri: str, service_binding_name: str) -> str:
+        if "?" in uri:
+            return uri
+        if "/sap/bc/adt/businessservices/odatav" not in uri.lower():
+            return uri
+        return f"{uri}?servicename={quote(service_binding_name.upper())}"
 
     def _parse_service_binding(self, text: str, service_binding_name: str) -> dict[str, Any]:
         root = ET.fromstring(text)

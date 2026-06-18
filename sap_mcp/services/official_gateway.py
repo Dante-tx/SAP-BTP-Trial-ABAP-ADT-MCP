@@ -191,11 +191,11 @@ class OfficialGatewayMixin:
         user: UserContext,
         destination: str,
         service_binding_name: str,
-        service_name: str,
-        service_definition: str,
-        service_version: str,
-        odata_info_uri: str,
-        odata_version: str,
+        service_name: str | None = None,
+        service_definition: str | None = None,
+        service_version: str | None = None,
+        odata_info_uri: str | None = None,
+        odata_version: str | None = None,
         is_published: bool | None = None,
     ) -> dict[str, Any]:
         return await self._run_with_connector(

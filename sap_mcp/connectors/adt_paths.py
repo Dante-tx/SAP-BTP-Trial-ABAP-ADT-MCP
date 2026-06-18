@@ -26,7 +26,7 @@ class AdtPathMixin:
 
     def _metadata_path(self, object_type: str | None, name: str | None, uri: str | None) -> str:
         if uri:
-            return self._adt_api_path(uri)
+            return self._normalize_business_service_info_uri(self._adt_api_path(uri))
         if not object_type or not name:
             raise ValidationError("Provide uri or object_type and name")
         return self._object_path(object_type, name)
@@ -215,7 +215,59 @@ class AdtPathMixin:
                     f"Provided uri {path} does not match resolved source uri {target.uri} for {object_type} {name}"
                 )
             return target
-        raise ValidationError("uri-only source operations currently support CLAS/INTF main/include ADT source URIs")
+        target = self._registered_source_target_from_uri(path, object_type, name, for_write=for_write)
+        if target:
+            return target
+        raise ValidationError(
+            "uri-only source operations support registered ADT source URIs such as "
+            "CLAS/INTF main/includes, DDLS, DCLS, BDEF, DDLX, SRVD, TABL, PROG, and FUNC"
+        )
+
+    def _registered_source_target_from_uri(
+        self,
+        path: str,
+        object_type: str | None,
+        name: str | None,
+        *,
+        for_write: bool,
+    ) -> SourceTarget | None:
+        for registration in ADT_PATH_REGISTRY_BY_ALIAS.values():
+            if registration.oo_source or not registration.source_suffix:
+                continue
+            match = self._match_registration_source_path(registration, path)
+            if not match:
+                continue
+            canonical_type = registration.canonical_type
+            object_name = (name or match.get("name") or match.get("function_name") or "").upper()
+            if canonical_type == "FUNC":
+                group_name = (match.get("group_name") or "").upper()
+                function_name = (match.get("function_name") or "").upper()
+                object_name = name.upper() if name else f"{group_name}/{function_name}"
+            if object_type and self._path_registration(object_type, "Unsupported source type").canonical_type != canonical_type:
+                raise ValidationError(f"Provided uri {path} does not match object_type {object_type}")
+            if name and name.strip().upper() != object_name:
+                raise ValidationError(f"Provided uri {path} does not match name {name}")
+            return SourceTarget(
+                object_type=canonical_type,
+                name=object_name,
+                uri=path,
+                source_kind=registration.read_kind,
+                scope="main",
+                round_trippable=registration.read_kind == "source",
+                read_hint=self._build_read_hint(canonical_type, object_name, "main", None, path),
+            )
+        return None
+
+    def _match_registration_source_path(self, registration: AdtPathRegistration, path: str) -> dict[str, str] | None:
+        root_pattern = re.escape(registration.root_template)
+        root_pattern = root_pattern.replace(re.escape("{name}"), r"(?P<name>[^/]+)")
+        root_pattern = root_pattern.replace(re.escape("{group_name}"), r"(?P<group_name>[^/]+)")
+        root_pattern = root_pattern.replace(re.escape("{function_name}"), r"(?P<function_name>[^/]+)")
+        pattern = rf"^{root_pattern}/{re.escape(registration.source_suffix or '').replace('/', r'/')}$"
+        match = re.match(pattern, path, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return {key: unquote(value) for key, value in match.groupdict(default="").items()}
 
     def _normalize_scope(self, scope: str | None) -> str:
         requested = (scope or "main").strip().lower().replace("-", "_")
@@ -399,6 +451,14 @@ class AdtPathMixin:
         if not path.startswith("/sap/bc/adt/"):
             raise ValidationError("ADT run/result URI must start with /sap/bc/adt/")
         return path
+
+    def _normalize_business_service_info_uri(self, path: str) -> str:
+        if "?" in path:
+            return path
+        match = re.match(r"^(/sap/bc/adt/businessservices/odatav[24]/(?P<name>[^/?#]+))$", path, flags=re.IGNORECASE)
+        if not match:
+            return path
+        return f"{match.group(1)}?servicename={quote(unquote(match.group('name')).upper())}"
 
     def _function_module_parts(self, name: str) -> tuple[str, str]:
         if "/" not in name:
