@@ -122,6 +122,23 @@ def register_workflow_tools(mcp: FastMCP, abap_gateway: AbapDevGateway) -> None:
             return await abap_gateway.transport_release(SYSTEM_USER, transport_request_number)
         raise ValidationError("action must be get, create, list_tasks, objects, or release")
 
+    @mcp.tool(name="abap_lock")
+    async def abap_lock(
+        object_url: str,
+        is_creation: bool = False,
+    ) -> dict[str, Any]:
+        """Lock an ABAP object via the ADT Lock API (POST /sap/bc/adt/locks). Returns lock_handle, corrnr (transport request number), and owner. For $TMP package objects, corrnr is empty. Lock should be released with abap_unlock after write operations."""
+        return await abap_gateway.lock_object(SYSTEM_USER, object_url, is_creation)
+
+    @mcp.tool(name="abap_unlock")
+    async def abap_unlock(
+        lock_handle: str,
+        object_url: str,
+    ) -> dict[str, Any]:
+        """Release an ADT object lock (DELETE /sap/bc/adt/locks). Pass the lock_handle and object_url returned by abap_lock."""
+        await abap_gateway.unlock_object(SYSTEM_USER, lock_handle, object_url)
+        return {"unlocked": True, "object_url": object_url}
+
     @mcp.tool(name="abap_business_services")
     async def abap_business_services(
         action: str,

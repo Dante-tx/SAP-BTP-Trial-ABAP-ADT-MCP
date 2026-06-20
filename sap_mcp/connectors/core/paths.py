@@ -102,6 +102,50 @@ class AdtPathMixin:
     def _function_module_name(self, parent: str, name: str) -> str:
         return f"{parent}/{name}" if parent else name
 
+    def _adt_object_type(self, object_type: str) -> str:
+        registration = self._path_registration(object_type, SUPPORTED_TYPES_HELP)
+        return registration.search_type or registration.canonical_type
+
+    def _adt_object_name(self, object_type: str, name: str) -> str:
+        object_name = name.strip().upper()
+        registration = self._path_registration(object_type, SUPPORTED_TYPES_HELP)
+        if registration.canonical_type == "FUNC":
+            _group_name, function_name = self._function_module_parts(object_name)
+            return function_name
+        return object_name
+
+    async def _resolve_repository_object_name(self, object_type: str | None, name: str | None) -> str | None:
+        if not object_type or not name:
+            return name
+        object_name = name.strip().upper()
+        if not object_name:
+            return name
+        registration = self._path_registration(object_type, SUPPORTED_TYPES_HELP)
+        if registration.canonical_type != "FUNC" or "/" in object_name:
+            return object_name
+        resolved_name = await self._resolve_function_module_name_from_repository(registration, object_name)
+        if resolved_name:
+            return resolved_name
+        raise ValidationError(
+            f"Function module {object_name} was not found through ADT Repository Information System. "
+            "Pass the fully qualified name as FUNCTION_GROUP/FUNCTION_MODULE if the object is not searchable."
+        )
+
+    async def _resolve_function_module_name_from_repository(
+        self, registration: AdtPathRegistration, function_name: str
+    ) -> str | None:
+        matches = await self._search_repository_objects(function_name, 10, registration.search_type, None)
+        for match in matches:
+            if (match.get("name") or "").upper() != function_name:
+                continue
+            uri = match.get("uri")
+            if not uri:
+                continue
+            resolved_name = self._match_registration_name(uri, registration)
+            if resolved_name and resolved_name.endswith(f"/{function_name}"):
+                return resolved_name
+        return None
+
     # ── Object Type Resolution ──────────────────────────────────────────
 
     def _path_registration(self, object_type: str, supported_types: str = SUPPORTED_TYPES_HELP) -> AdtPathRegistration:
@@ -513,6 +557,7 @@ class AdtPathMixin:
         objects: list[dict[str, str]] | None,
         packages: list[str] | None,
         include_subpackages: bool,
+        namespace: str = "aunit",
     ) -> str:
         """Build an object-set XML element for ABAP Unit / ATC requests."""
         if not objects and not packages:
@@ -524,6 +569,9 @@ class AdtPathMixin:
             obj_name = (item.get("name") or "").strip()
             if not obj_type or not obj_name:
                 raise ValidationError("Each object must contain name and type/object_type")
+
+        if namespace == "objectset":
+            return self._object_set_xml_for_atc(objects or [], packages or [], include_subpackages)
 
         result = ""
         if packages:
@@ -541,6 +589,35 @@ class AdtPathMixin:
                 result += f'<aunit:object_name type="{self._xml_escape(obj_type)}" name="{self._xml_escape(obj_name)}"/>'
 
         return f"<aunit:objects>{result}</aunit:objects>"
+
+    def _object_set_xml_for_atc(
+        self,
+        objects: list[dict[str, str]],
+        packages: list[str],
+        include_subpackages: bool,
+    ) -> str:
+        sets: list[str] = []
+        for package in packages:
+            package_name = package.strip().upper()
+            if package_name:
+                self._assert_package_read_allowed(package_name) if hasattr(self, "_assert_package_read_allowed") else None
+                include = "true" if include_subpackages else "false"
+                sets.append(
+                    f'<osl:set xsi:type="osl:packageSet">'
+                    f'<osl:package includeSubpackages="{include}" name="{self._xml_escape(package_name)}"/>'
+                    f"</osl:set>")
+        object_xml: list[str] = []
+        for item in objects:
+            obj_type = (item.get("type") or item.get("object_type") or "").upper()
+            obj_name = (item.get("name") or "").upper()
+            object_xml.append(f'<osl:object name="{self._xml_escape(obj_name)}" type="{self._xml_escape(obj_type)}"/>')
+        if object_xml:
+            sets.append(f'<osl:set xsi:type="osl:flatObjectSet">{"".join(object_xml)}</osl:set>')
+        return (
+            '<osl:objectSet xsi:type="unionSet" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xmlns:osl="http://www.sap.com/adt/objectset">'
+            f'{"".join(sets)}</osl:objectSet>')
 
     def _initial_create_source(self, registration: AdtPathRegistration, name: str, description: str) -> str:
         """Minimal source template for new object creation."""

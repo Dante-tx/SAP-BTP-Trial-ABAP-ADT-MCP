@@ -24,6 +24,26 @@ def token_values(config: AppConfig) -> set[str]:
     return {token.get_secret_value() for token in config.server.auth_tokens if token.get_secret_value()}
 
 
+def check_tool_whitelist(tool_name: str, allowed_tools: set[str]) -> None:
+    """Check if a tool is allowed by the configured whitelist.
+    
+    Args:
+        tool_name: The name of the tool to check.
+        allowed_tools: Set of allowed tool names. If "*" is present, all tools are allowed.
+    
+    Raises:
+        AuthorizationError: If the tool is not in the whitelist.
+    """
+    if "*" in allowed_tools:
+        return
+    if tool_name in allowed_tools:
+        return
+    raise AuthorizationError(
+        f"Tool '{tool_name}' is not in the allowed tools whitelist. "
+        f"Configure 'server.allowed_tools' in sap-mcp.yaml to grant access."
+    )
+
+
 def authorize_tool(user: UserContext, tool_name: str, write: bool = False) -> None:
     if write and "abap.write" not in user.roles:
         raise AuthorizationError(f"User {user.subject} is not allowed to execute write tools")

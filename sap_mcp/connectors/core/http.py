@@ -388,7 +388,7 @@ class AdtHttpMixin:
                 server_etag = error.details.get("server_etag") or self._server_etag_from_precondition(str(error))
                 if not server_etag:
                     continue
-                merged_headers["If-Match"] = server_etag.strip() if attempt == 0 else self._if_match_etag(server_etag)
+                merged_headers["If-Match"] = self._if_match_etag(server_etag)
                 etag_source = "server_retry" if attempt == 0 else f"server_retry_{attempt + 1}"
 
         raise SapBackendError("Max ETag retries exceeded")

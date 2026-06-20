@@ -2,6 +2,10 @@ server:
   name: "SAP ABAP ADT MCP Server"
   auth_tokens:
     - "dev-token"
+  # Whitelist of allowed MCP tools. Set to ["*"] to allow all tools.
+  # Example: ["abap_read_source", "abap_find_objects", "abap_system_info"]
+  allowed_tools:
+    - "*"
 
 abap_dev:
   system_url: "https://your-abap-instance.abap.region.hana.ondemand.com"

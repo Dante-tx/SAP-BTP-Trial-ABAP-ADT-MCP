@@ -17,22 +17,20 @@ class AdtDeleteMixin(LockMixin):
         transport_request_number: str | None = None,
     ) -> dict[str, Any]:
         self._assert_write_allowed(reason)
-        await self._assert_object_write_allowed(object_type, name)
         canonical_type = self._canonical_object_type(object_type)
-        object_name = name.strip().upper()
+        resolved_name = await self._resolve_repository_object_name(canonical_type, name)
+        object_name = (resolved_name or name).strip().upper()
+        await self._assert_object_write_allowed(canonical_type, object_name)
         uri = self._object_path(canonical_type, object_name)
         corrnr_params = self._delete_corrnr_params(transport_request_number)
         request_etag, etag_source = await self._delete_request_etag(canonical_type, object_name, uri, etag)
         active_uri = self._active_delete_path(uri)
         try:
-            response, etag_source = await self._retry_on_etag_conflict(
+            response = await self._request(
                 "DELETE", uri,
                 params=corrnr_params,
-                headers={"If-Match": request_etag or "*"},
+                headers={"If-Match": request_etag},
                 accept="application/xml, text/plain, */*",
-                initial_etag=request_etag,
-                initial_etag_source=etag_source,
-                max_retries=0,
             )
         except SapBackendError as error:
             return await self._delete_after_initial_failure(canonical_type, object_name, uri, active_uri, error, corrnr_params)

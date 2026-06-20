@@ -12,6 +12,7 @@ from sap_mcp.connectors.core.authorization import AdtAuthorizationMixin
 from sap_mcp.connectors.core.base import BaseMixin
 from sap_mcp.connectors.core.registry import ADT_ACCEPT, ADT_BASE_PATH
 from sap_mcp.connectors.objects.search import AdtSearchMixin
+from sap_mcp.connectors.objects.signature import AdtSignatureMixin
 from sap_mcp.connectors.objects.creation import AdtCreationMixin, CreationMixin
 from sap_mcp.connectors.objects.source import AdtSourceMixin
 from sap_mcp.connectors.objects.data_preview import DataPreviewMixin
@@ -24,6 +25,7 @@ from sap_mcp.connectors.lifecycle.activation import AdtActivationMixin
 from sap_mcp.connectors.lifecycle.quality import AdtQualityMixin
 from sap_mcp.connectors.lifecycle.syntax_check import AdtSyntaxCheckMixin
 from sap_mcp.connectors.lifecycle.transport import TransportsMixin
+from sap_mcp.connectors.lifecycle.lock import AdtLockMixin
 from sap_mcp.connectors.integration.service_binding import AdtServiceBindingMixin
 from sap_mcp.connectors.analysis.cds_analysis import CdsAnalysisMixin
 from sap_mcp.connectors.analysis.code_assist import CodeAssistMixin
@@ -41,12 +43,13 @@ ADT_CONNECTOR_MIXIN_CONTRACTS = {
     "ExecutionMixin": ("_request",),
     "FunctionModuleMixin": ("activate_object", "create_object", "data_preview", "delete_object", "execute"),
     "SystemInfoMixin": ("_request",),
+    "AdtLockMixin": ("_request",),
     "AdtActivationMixin": (
-        "_assert_object_write_allowed", "_object_path",
-        "_object_references_xml", "_request",
+        "_adt_object_name", "_adt_object_type", "_assert_object_write_allowed", "_object_path",
+        "_object_references_xml", "_request", "_resolve_repository_object_name",
     ),
     "AdtAuthorizationMixin": (
-        "_find_path_registration", "_function_module_parts", "_search_repository_objects",
+        "_find_path_registration", "_function_module_parts", "_match_registration_name", "_search_repository_objects",
     ),
     "AdtCreationMixin": (
         "_assert_object_write_allowed", "_assert_package_allowed", "_assert_write_allowed",
@@ -60,7 +63,7 @@ ADT_CONNECTOR_MIXIN_CONTRACTS = {
         "_assert_object_write_allowed", "_assert_write_allowed",
         "_canonical_object_type", "_find_path_registration",
         "_if_match_etag", "_normalized_etag", "_object_path",
-        "_request", "_server_etag_from_precondition",
+        "_request", "_resolve_repository_object_name", "_server_etag_from_precondition",
         "_source_etag", "_source_path", "_xml_local_name",
     ),
     "AdtHttpMixin": ("_clean_xml_name",),
@@ -68,18 +71,26 @@ ADT_CONNECTOR_MIXIN_CONTRACTS = {
         "_adt_relative_url", "_clean_xml_name",
         "_find_path_registration", "_normalize_include_type",
     ),
-    "AdtWhereUsedMixin": ("_request", "_search_repository_objects"),
+    "AdtWhereUsedMixin": ("_adt_object_name", "_adt_object_type", "_request", "_resolve_repository_object_name", "_search_repository_objects"),
     "AdtPathMixin": ("_default_source",),
     "AdtQualityMixin": (
         "_adt_api_path", "_assert_package_read_allowed",
         "_clean_xml_name", "_request", "_xml_escape",
     ),
-    "AdtSyntaxCheckMixin": ("_clean_xml_name", "_request"),
+    "AdtSyntaxCheckMixin": ("_adt_object_name", "_adt_object_type", "_request", "_resolve_repository_object_name"),
+    "TransportsMixin": (
+        "_adt_object_name", "_assert_destination", "_find_path_registration", "_object_path",
+        "_request", "_resolve_repository_object_name", "_resolve_source_target",
+        "data_preview", "lock_object", "unlock_object",
+    ),
     "AdtSearchMixin": (
         "_assert_package_read_allowed", "_clean_xml_name",
         "_function_module_parts", "_is_package_write_allowed",
         "_is_source_search_type", "_path_registration",
         "_request", "read_source",
+    ),
+    "AdtSignatureMixin": (
+        "_canonical_type", "function_metadata", "read_source",
     ),
     "AdtServiceBindingMixin": (
         "_assert_object_write_allowed", "_assert_write_allowed",
@@ -92,7 +103,7 @@ ADT_CONNECTOR_MIXIN_CONTRACTS = {
         "_build_read_hint", "_is_metadata_write_path",
         "_is_oo_source_type", "_normalized_etag",
         "_oo_source_part", "_request",
-        "_resolve_source_target", "_server_etag_from_precondition",
+        "_resolve_repository_object_name", "_resolve_source_target", "_server_etag_from_precondition",
     ),
 }
 
@@ -118,6 +129,7 @@ class AdtConnector(
     AdtCreationMixin,
     CreationMixin,
     AdtSearchMixin,
+    AdtSignatureMixin,
     AdtSourceMixin,
     DataPreviewMixin,
     ExecutionMixin,
@@ -130,6 +142,7 @@ class AdtConnector(
     AdtQualityMixin,
     AdtSyntaxCheckMixin,
     TransportsMixin,
+    AdtLockMixin,
     # integration
     CdsAnalysisMixin,
     CodeAssistMixin,
@@ -161,6 +174,7 @@ class AdtConnector(
         name: str | None = None,
         uri: str | None = None,
     ) -> dict[str, Any]:
+        name = await self._resolve_repository_object_name(object_type, name) if object_type and name and not uri else name
         path = self._metadata_path(object_type, name, uri)
         response = await self._request("GET", path, accept="application/xml, application/*, */*")
         requested_type = object_type.upper() if object_type else None

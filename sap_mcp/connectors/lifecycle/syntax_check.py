@@ -20,9 +20,12 @@ class AdtSyntaxCheckMixin:
         The request sends the source as plain text with headers identifying the object.
         The response contains structured XML with errors/warnings.
         """
-        object_name = name.strip().upper()
+        resolved_name = await self._resolve_repository_object_name(object_type, name)
+        object_name = (resolved_name or name).strip().upper()
         if not object_name:
             raise ValidationError("name is required")
+        adt_object_type = self._adt_object_type(object_type)
+        adt_object_name = self._adt_object_name(object_type, object_name)
 
         findings: list[dict[str, Any]] = []
         status_code = 200
@@ -34,8 +37,8 @@ class AdtSyntaxCheckMixin:
                 content=source.encode("utf-8"),
                 headers={
                     "Content-Type": "text/plain; charset=utf-8",
-                    "adtObjectType": object_type.upper(),
-                    "adtObjectName": object_name,
+                    "adtObjectType": adt_object_type,
+                    "adtObjectName": adt_object_name,
                 },
                 accept="application/xml, application/*, */*",
             )
@@ -46,15 +49,18 @@ class AdtSyntaxCheckMixin:
                 raise
             mode = "local_static_fallback"
             findings = self._local_static_syntax_findings(source)
-        return {
-            "object_type": object_type.upper(),
-            "name": object_name,
+        result = {
+            "object_type": adt_object_type,
+            "name": adt_object_name,
             "checked": True,
             "findings": findings,
             "counts": self._count_severities(findings),
             "status_code": status_code,
             "mode": mode,
         }
+        if object_name != adt_object_name:
+            result["resolved_name"] = object_name
+        return result
 
     def _local_static_syntax_findings(self, source: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

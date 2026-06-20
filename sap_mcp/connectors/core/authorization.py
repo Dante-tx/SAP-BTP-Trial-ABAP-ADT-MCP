@@ -38,7 +38,7 @@ class AdtAuthorizationMixin:
         registration = self._find_path_registration(object_type)
         search_name = name
         if registration and registration.canonical_type == "FUNC":
-            search_name, _ = self._function_module_parts(name)
+            _group_name, search_name = self._function_module_parts(name)
         search_type = registration.search_type if registration else object_type.upper().split("/", 1)[0]
         try:
             results = await self._search_repository_objects(search_name, DEFAULT_MAX_RESULTS, search_type, None)
@@ -46,6 +46,12 @@ class AdtAuthorizationMixin:
             return None
         object_name = search_name.upper()
         for item in results:
-            if item.get("name", "").upper() == object_name and item.get("packageName"):
+            if item.get("name", "").upper() != object_name or not item.get("packageName"):
+                continue
+            if registration and registration.canonical_type == "FUNC" and "/" in name:
+                resolved_name = self._match_registration_name(item.get("uri", ""), registration)
+                if resolved_name and resolved_name != name.upper():
+                    continue
                 return item["packageName"]
+            return item["packageName"]
         return None

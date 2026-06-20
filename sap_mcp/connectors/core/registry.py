@@ -284,6 +284,8 @@ ADT_PATH_REGISTRATIONS = (
         create_xml_name="group:abapFunctionGroup",
         create_xml_namespace='xmlns:group="http://www.sap.com/adt/functions/groups"',
         create_adt_type="FUGR/F",
+        create_abap_language_version=None,
+        create_content_type="application/vnd.sap.adt.functions.groups.v2+xml; charset=utf-8",
     ),
     AdtPathRegistration(
         "FUNC",
@@ -292,7 +294,7 @@ ADT_PATH_REGISTRATIONS = (
         "source/main",
         "source/main",
         "source",
-        "FUGR",
+        "FUGR/FF",
         collection_template="/sap/bc/adt/functions/groups/{group_name}/fmodules",
     ),
 )

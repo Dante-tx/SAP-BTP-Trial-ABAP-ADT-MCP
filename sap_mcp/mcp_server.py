@@ -14,7 +14,8 @@ from sap_mcp.tools.workflows import register_workflow_tools
 
 def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) -> FastMCP:
     config = config or get_config()
-    abap_gateway = AbapDevGateway(config.abap_dev)
+    allowed_tools = set(config.server.allowed_tools) if config.server.allowed_tools else {"*"}
+    abap_gateway = AbapDevGateway(config.abap_dev, allowed_tools=allowed_tools)
     mcp = FastMCP(config.server.name, stateless_http=stateless_http, json_response=True)
 
     @mcp.tool()
@@ -85,8 +86,17 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
         include_type: str | None = None,
         uri: str | None = None,
     ) -> dict[str, Any]:
-        """Read ABAP source through ADT. Use scope=include with include_type for CLAS/INTF includes; use scope=active/inactive for version-specific reads; use scope=both to compare active and inactive versions; use uri for an exact ADT source URI."""
+        """Read ABAP source through ADT. Use scope=include with include_type for CLAS/INTF includes; use scope=active/inactive for version-specific reads; use scope=both to compare active and inactive versions; use uri for an exact ADT source URI. For FUGR/FF (function module), you may pass just the function module name; the function group will be resolved automatically."""
         return await abap_gateway.read_source(SYSTEM_USER, object_type, name, scope, include_type, uri)
+
+    @mcp.tool()
+    async def abap_describe_signature(
+        object_type: str,
+        name: str,
+        method_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Describe the parameter signature of an ABAP callable object. Supports FUGR/FF (function module), CLAS/CI (class method), and INTF/IF (interface method). For FUGR/FF, method_name is ignored; for CLAS/CI and INTF/IF, method_name is required. Returns structured importing/exporting/changing/returning parameters with name, type, optional flag, default value, and pass-by mode."""
+        return await abap_gateway.describe_signature(SYSTEM_USER, object_type, name, method_name)
 
     @mcp.tool()
     async def abap_get_object_metadata(
@@ -95,7 +105,7 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
         uri: str | None = None,
         destination: str | None = None,
     ) -> dict[str, Any]:
-        """Read ABAP object metadata, package, links, and source part descriptors. destination is accepted for signature consistency; the configured ADT system is used."""
+        """Read ABAP object metadata, package, links, and source part descriptors. destination is accepted for signature consistency; the configured ADT system is used. For FUGR/FF (function module), you may pass just the function module name; the function group will be resolved automatically."""
         return await abap_gateway.get_object_metadata(SYSTEM_USER, object_type, name, uri, destination)
 
     @mcp.tool()
@@ -148,13 +158,14 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
         object_type: str | None = None,
         name: str | None = None,
         objects: list[dict[str, str]] | None = None,
+        cascade: bool = False,
     ) -> dict[str, Any]:
-        """Activate one or more ABAP repository objects. Pass object_type/name for one object, or objects for batch activation."""
+        """Activate one or more ABAP repository objects. Pass object_type/name for one object, or objects for batch activation. Set cascade=true for PROG to automatically include all INCLUDE dependencies."""
         if objects:
             return await abap_gateway.activate_objects(SYSTEM_USER, objects, reason)
         if not object_type or not name:
             raise ValidationError("Provide object_type and name, or objects")
-        return await abap_gateway.activate_object(SYSTEM_USER, object_type, name, reason)
+        return await abap_gateway.activate_object(SYSTEM_USER, object_type, name, reason, cascade=cascade)
 
     @mcp.tool()
     async def abap_delete_object(
@@ -283,13 +294,35 @@ def create_mcp(config: AppConfig | None = None, *, stateless_http: bool = True) 
     @mcp.tool()
     async def abap_call_function(
         function_name: str,
+        confirmed: bool = False,
         importing: dict[str, Any] | None = None,
         changing: dict[str, Any] | None = None,
         tables: dict[str, list[dict[str, Any]]] | None = None,
         destination: str | None = None,
         commit: bool = False,
     ) -> dict[str, Any]:
-        """Call an ABAP function module, including BAPIs. Pass IMPORTING/CHANGING/TABLES values matching the Function Builder interface. commit is false by default; set true only for controlled write BAPIs."""
+        """[HIGH RISK — Requires explicit confirmation] Execute an ABAP function module by creating a temporary ZMCP_FM_* class in $TMP, activating, running, then deleting it. Set confirmed=true to proceed after reviewing the warning below."""
+        if not confirmed:
+            return {
+                "warning": True,
+                "message": (
+                    f"⚠️ **高风险操作 — 需要您确认**\n\n"
+                    f"调用函数模块 **{function_name}** 将通过以下方式在 ABAP 系统中执行：\n\n"
+                    f"1. 在包 **$TMP** 中创建一个临时类（名称格式 `ZCL_FM_MCP_*`）\n"
+                    f"2. 将函数调用代码注入该类并激活\n"
+                    f"3. 执行该类（`if_oo_adt_classrun~main`）\n"
+                    f"4. 执行完毕后自动删除该临时类\n\n"
+                    f"**操作详情：**\n"
+                    f"- 函数模块：{function_name}\n"
+                    f"- 提交事务（commit）：{'是' if commit else '否'}\n"
+                    f"- 远程目标（destination）：{destination or '无（本地调用）'}\n\n"
+                    f"**风险说明：**\n"
+                    f"- 该操作会在系统中短暂创建并激活一个临时类\n"
+                    f"- 如果 `commit=true`，对数据库的修改将直接提交，无法回滚\n"
+                    f"- 请仅在了解函数行为的情况下执行\n\n"
+                    f"如果确认无误，请将参数 **`confirmed=True`** 再次发起调用。"
+                ),
+            }
         return await abap_gateway.call_function(
             SYSTEM_USER, function_name, importing, changing, tables, destination, commit
         )

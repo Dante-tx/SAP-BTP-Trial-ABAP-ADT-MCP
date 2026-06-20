@@ -5,7 +5,6 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from sap_mcp.connectors.core.registry import ADT_BASE_PATH
-from sap_mcp.errors import ValidationError
 
 
 class AdtQualityMixin:
@@ -70,7 +69,7 @@ class AdtQualityMixin:
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             f'<atc:runparameters xmlns:atc="http://www.sap.com/adt/atc" {" ".join(attrs)}>'
-            f"{self._object_set_xml(objects, packages, include_subpackages)}"
+            f"{self._object_set_xml(objects, packages, include_subpackages, namespace='objectset')}"
             "</atc:runparameters>"
         )
         response = await self._request(
@@ -103,39 +102,6 @@ class AdtQualityMixin:
         )
         summary = self._parse_checkstyle_result(response.text)
         return {"kind": "atc", "result_uri": self._adt_api_path(result_uri), "status_code": response.status_code, "summary": summary, "raw_xml": response.text}
-
-    def _object_set_xml(self, objects: list[dict[str, str]] | None, packages: list[str] | None, include_subpackages: bool) -> str:
-        object_items = objects or []
-        package_items = packages or []
-        if not object_items and not package_items:
-            raise ValidationError("At least one object or package is required")
-        sets: list[str] = []
-        for package in package_items:
-            package_name = package.strip().upper()
-            if not package_name:
-                continue
-            self._assert_package_read_allowed(package_name)
-            include = "true" if include_subpackages else "false"
-            sets.append(
-                f'<osl:set xsi:type="osl:packageSet">'
-                f'<osl:package includeSubpackages="{include}" name="{self._xml_escape(package_name)}"/>'
-                f"</osl:set>")
-        object_xml: list[str] = []
-        for item in object_items:
-            object_type = (item.get("type") or item.get("object_type") or "").strip().upper()
-            object_name = (item.get("name") or "").strip().upper()
-            if not object_type or not object_name:
-                raise ValidationError("Each object must contain name and type/object_type")
-            object_xml.append(f'<osl:object name="{self._xml_escape(object_name)}" type="{self._xml_escape(object_type)}"/>')
-        if object_xml:
-            sets.append(f'<osl:set xsi:type="osl:flatObjectSet">{"".join(object_xml)}</osl:set>')
-        if not sets:
-            raise ValidationError("At least one non-empty object or package is required")
-        return (
-            '<osl:objectSet xsi:type="unionSet" '
-            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
-            'xmlns:osl="http://www.sap.com/api/osl">'
-            f'{"".join(sets)}</osl:objectSet>')
 
     async def _wait_for_run_result(self, run_uri: str, accept: str, wait_seconds: int) -> dict[str, Any]:
         deadline = asyncio.get_running_loop().time() + max(1, min(wait_seconds, 300))

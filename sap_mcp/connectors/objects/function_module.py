@@ -214,7 +214,7 @@ class FunctionModuleMixin:
     def _function_runner_name(function_name: str) -> str:
         safe_name = re.sub(r"[^A-Z0-9]", "_", function_name.upper())
         digest = sha1(function_name.encode("utf-8")).hexdigest()[:8].upper()
-        return f"ZMCP_FM_{safe_name[:13]}_{digest}"[:30]
+        return f"ZCL_FM_MCP_{safe_name[:12]}_{digest}"[:30]
 
     @staticmethod
     def _parse_function_output(output: str) -> dict[str, Any]:

@@ -9,33 +9,38 @@ from sap_mcp.config import AbapDevConfig
 from sap_mcp.connectors.adt import AdtConnector
 from sap_mcp.connectors.core.registry import DEFAULT_MAX_RESULTS, DEFAULT_PACKAGE_LIST_LIMIT
 from sap_mcp.errors import AuthorizationError, ConfigError, ValidationError
-from sap_mcp.security import UserContext, authorize_tool
+from sap_mcp.security import UserContext, authorize_tool, check_tool_whitelist
 
 
 T = TypeVar("T")
 
 class AbapDevGateway:
-    def __init__(self, config: AbapDevConfig):
+    def __init__(self, config: AbapDevConfig, *, allowed_tools: set[str] | None = None):
         self.config = config
         self.sessions = BrowserSsoSessionManager(config)
+        self.allowed_tools = allowed_tools or {"*"}
 
     async def login(self, user: UserContext) -> dict[str, Any]:
+        check_tool_whitelist("abap_adt_session", self.allowed_tools)
         authorize_tool(user, "abap_adt_session")
         return await self.sessions.login()
 
     def save_session(
         self, user: UserContext, cookies: dict[str, str], headers: dict[str, str] | None = None
     ) -> dict[str, Any]:
+        check_tool_whitelist("abap_adt_session", self.allowed_tools)
         authorize_tool(user, "abap_adt_session", write=True)
         return self.sessions.save_session(cookies, headers)
 
     def save_cookie_header(
         self, user: UserContext, cookie_header: str, headers: dict[str, str] | None = None
     ) -> dict[str, Any]:
+        check_tool_whitelist("abap_adt_session", self.allowed_tools)
         authorize_tool(user, "abap_adt_session", write=True)
         return self.sessions.save_cookie_header(cookie_header, headers)
 
     def clear_session(self, user: UserContext) -> dict[str, Any]:
+        check_tool_whitelist("abap_adt_session", self.allowed_tools)
         authorize_tool(user, "abap_adt_session", write=True)
         return self.sessions.clear_session()
 
@@ -82,6 +87,7 @@ class AbapDevGateway:
         )
 
     async def connect(self, user: UserContext) -> dict[str, Any]:
+        check_tool_whitelist("abap_adt_session", self.allowed_tools)
         authorize_tool(user, "abap_adt_session")
         _connector, discovery = await self._authenticated_connector()
         return discovery
@@ -139,6 +145,20 @@ class AbapDevGateway:
             "abap_read_source",
             lambda connector: connector.read_source(object_type, name, scope, include_type, uri),
             "reading ABAP source",
+        )
+
+    async def describe_signature(
+        self,
+        user: UserContext,
+        object_type: str,
+        name: str,
+        method_name: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._read_operation(
+            user,
+            "abap_describe_signature",
+            lambda connector: connector.describe_signature(object_type, name, method_name),
+            "describing ABAP signature",
         )
 
     async def get_object_metadata(
@@ -298,11 +318,14 @@ class AbapDevGateway:
             "updating ABAP source",
         )
 
-    async def activate_object(self, user: UserContext, object_type: str, name: str, reason: str) -> dict[str, Any]:
+    async def activate_object(
+        self, user: UserContext, object_type: str, name: str, reason: str,
+        cascade: bool = False,
+    ) -> dict[str, Any]:
         return await self._write_operation(
             user,
             "abap_activate",
-            lambda connector: connector.activate_object(object_type, name, reason),
+            lambda connector: connector.activate_object(object_type, name, reason, cascade=cascade),
             "activating the ABAP object",
         )
 
@@ -543,7 +566,7 @@ class AbapDevGateway:
             user,
             "abap_transport",
             lambda connector: connector.transport_get(
-                destination, object_name, object_type, development_package, is_creation
+                destination, development_package, object_name, object_type, is_creation
             ),
             "reading transport requests",
         )
@@ -595,6 +618,32 @@ class AbapDevGateway:
             "abap_transport",
             lambda connector: connector.transport_release(transport_request_number),
             "releasing the transport request",
+        )
+
+    async def lock_object(
+        self,
+        user: UserContext,
+        object_url: str,
+        is_creation: bool = False,
+    ) -> dict[str, Any]:
+        return await self._read_operation(
+            user,
+            "abap_transport",
+            lambda connector: connector.lock_object(object_url, is_creation=is_creation),
+            "locking the ABAP object",
+        )
+
+    async def unlock_object(
+        self,
+        user: UserContext,
+        lock_handle: str,
+        object_url: str,
+    ) -> None:
+        await self._read_operation(
+            user,
+            "abap_transport",
+            lambda connector: connector.unlock_object(lock_handle, object_url),
+            "unlocking the ABAP object",
         )
 
     async def where_used(
@@ -768,6 +817,7 @@ class AbapDevGateway:
         quality_action: str | None = None,
         write: bool = False,
     ) -> T:
+        check_tool_whitelist(tool_name, self.allowed_tools)
         authorize_tool(user, tool_name, write=write)
         connector, _discovery = await self._authenticated_connector()
         try:

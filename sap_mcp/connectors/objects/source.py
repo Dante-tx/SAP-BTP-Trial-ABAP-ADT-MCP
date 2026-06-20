@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote
 
-from sap_mcp.connectors.core.registry import ADT_BASE_PATH, AdtResponse
+from sap_mcp.connectors.core.registry import AdtResponse
 from sap_mcp.errors import SapBackendError, ValidationError
 
 
@@ -16,6 +15,7 @@ _INCLUDE_MARKER_RE = re.compile(
 
 
 _VERSION_KEYS = ("active", "inactive")
+_INCL_FALLBACK_TYPES = frozenset({"PROG", "FUGR"})
 
 
 def _detect_include_type_from_source(source: str) -> str | None:
@@ -51,6 +51,9 @@ class AdtSourceMixin:
 
         # For version scopes, treat path resolution like main scope
         resolve_scope = "main" if version_scope else normalized_scope
+
+        name = await self._resolve_repository_object_name(object_type, name) if object_type and name and not uri else name
+
         target = self._resolve_source_target(object_type, name, resolve_scope, include_type, uri)
 
         def _version_path(base_uri: str, version: str | None) -> str:
@@ -144,7 +147,17 @@ class AdtSourceMixin:
                 "read_hint": "Active (compiled) CDS source is read-only. Use scope=main to edit.",
             }
 
-        response = await self._request("GET", path, accept="text/plain, application/xml, */*")
+        try:
+            response = await self._request("GET", path, accept="text/plain, application/xml, */*")
+        except SapBackendError as error:
+            if error.details.get("status_code") == 404 and target.object_type.upper() in _INCL_FALLBACK_TYPES:
+                incl_target = self._resolve_source_target("INCL", name, scope, include_type, None)
+                incl_path = incl_target.uri
+                response = await self._request("GET", incl_path, accept="text/plain, application/xml, */*")
+                target = incl_target
+                path = incl_path
+            else:
+                raise
         etag = self._normalized_etag(response.headers.get("etag"), response.content_type)
         result = {
             "object_type": target.object_type,
@@ -192,6 +205,7 @@ class AdtSourceMixin:
             stripped_source = lines[1] if len(lines) > 1 else ""
 
         requested_scope = "include" if resolved_include_type else None
+        name = await self._resolve_repository_object_name(object_type, name) if object_type and name and not uri else name
         target = self._resolve_source_target(object_type, name, requested_scope, resolved_include_type, uri, for_write=True)
         if not target.round_trippable:
             raise ValidationError(

@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from sap_mcp.connectors.adt import AdtConnector
     from sap_mcp.connectors.core.registry import AdtPathRegistration
 
-_VERIFIED_METADATA_THEN_SOURCE: Final[frozenset[str]] = frozenset({"DDLS", "DCLS", "DDLX", "CLAS", "INTF", "SRVD"})
-_VERIFIED_METADATA_ONLY: Final[frozenset[str]] = frozenset({"PROG", "FUGR", "DTEL", "DOMA", "DEVC"})
+_VERIFIED_METADATA_THEN_SOURCE: Final[frozenset[str]] = frozenset({"DDLS", "DCLS", "DDLX", "CLAS", "INTF", "SRVD", "PROG"})
+_VERIFIED_METADATA_ONLY: Final[frozenset[str]] = frozenset({"FUGR", "DTEL", "DOMA", "DEVC"})
 _VERIFIED_PUT_SOURCE: Final[frozenset[str]] = frozenset()
 _VERIFIED_BLUE_SOURCE: Final[frozenset[str]] = frozenset({"BDEF", "TABL"})
 

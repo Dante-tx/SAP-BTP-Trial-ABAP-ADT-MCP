@@ -271,10 +271,13 @@ class AdtSearchMixin:
     ) -> dict[str, Any] | None:
         for item in results:
             item_name = (item.get("name") or "").upper()
-            item_type = (item.get("type") or "").upper().split("/", 1)[0]
-            if canonical_type == "FUNC" and object_name.endswith(f"/{item_name}") and item_type in {"", "FUGR", "FUNC"}:
+            item_type = (item.get("type") or "").upper()
+            base_type = item_type.split("/", 1)[0]
+            if canonical_type == "FUNC" and item_name == object_name and item_type == "FUGR/FF":
                 return item
-            if item_name == object_name and (not item_type or item_type == canonical_type):
+            if canonical_type == "FUNC" and object_name.endswith(f"/{item_name}") and item_type in {"", "FUGR/FF", "FUNC"}:
+                return item
+            if item_name == object_name and (not base_type or base_type == canonical_type):
                 return item
         return None
 

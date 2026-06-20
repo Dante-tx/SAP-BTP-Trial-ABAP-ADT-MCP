@@ -23,6 +23,7 @@ class RuntimeSettings(BaseSettings):
 class ServerConfig(BaseModel):
     name: str = "SAP BTP Trial ABAP ADT MCP Server"
     auth_tokens: list[SecretStr] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=lambda: ["*"])
 
 
 class AbapDevConfig(BaseModel):

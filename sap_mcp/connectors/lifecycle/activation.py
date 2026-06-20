@@ -1,25 +1,50 @@
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
 from sap_mcp.connectors.core.registry import ADT_BASE_PATH, ADT_PATH_REGISTRATIONS
-from sap_mcp.errors import AuthorizationError, ValidationError
+from sap_mcp.errors import AuthorizationError, SapBackendError, ValidationError
+
+# Pattern to find INCLUDE statements in ABAP: INCLUDE zsome_name.
+_INCLUDE_STMT_RE = re.compile(r'^\s*INCLUDE\s+(\w[\w/]*\w)\s*\.', re.IGNORECASE | re.MULTILINE)
 
 
 class AdtActivationMixin:
-    async def activate_object(self, object_type: str, name: str, reason: str) -> dict[str, Any]:
-        result = await self.activate_objects([{"type": object_type, "name": name}], reason)
+    async def activate_object(
+        self, object_type: str, name: str, reason: str, cascade: bool = False
+    ) -> dict[str, Any]:
+        resolved_name = await self._resolve_repository_object_name(object_type, name)
+        object_name = resolved_name or name
+        objects = [{"type": object_type, "name": object_name}]
+        if cascade:
+            includes = await self._discover_includes(object_type, object_name)
+            for incl in includes:
+                objects.append({"type": "INCL", "name": incl})
+        result = await self.activate_objects(objects, reason)
         obj_results = result.get("object_results", [])
         my_result = obj_results[0] if obj_results else {}
         return {
             "activated": result.get("activated", True),
-            "object_type": object_type, "name": name.upper(),
+            "object_type": object_type, "name": object_name.upper(),
             "status_code": result["status_code"],
             "activation_state": my_result.get("state"),
             "activation_state_text": my_result.get("state_text"),
             "messages": my_result.get("messages", []),
+            "cascaded_objects": [r for r in obj_results[1:]] if cascade and len(obj_results) > 1 else [],
         }
+
+    async def _discover_includes(self, object_type: str, name: str) -> list[str]:
+        """Read source and extract INCLUDE names (works for PROG, FUGR, etc.)."""
+        try:
+            source_result = await self.read_source(object_type=object_type, name=name, scope="main")
+            source = source_result.get("source", "")
+            return sorted(set(
+                m.strip().upper() for m in _INCLUDE_STMT_RE.findall(source)
+            ))
+        except (SapBackendError, AttributeError):
+            return []
 
     async def activate_objects(self, objects: list[dict[str, str]], reason: str) -> dict[str, Any]:
         if not self.config.allow_activate:
@@ -32,9 +57,18 @@ class AdtActivationMixin:
             name = (item.get("name") or "").strip()
             if not object_type or not name:
                 raise ValidationError("Each object must contain name and type/object_type")
-            uri = self._object_path(object_type, name)
-            await self._assert_object_write_allowed(object_type, name)
-            references.append({"object_type": object_type.upper(), "name": name.upper(), "uri": uri})
+            resolved_name = await self._resolve_repository_object_name(object_type, name)
+            object_name = resolved_name or name
+            uri = self._object_path(object_type, object_name)
+            await self._assert_object_write_allowed(object_type, object_name)
+            adt_type = self._adt_object_type(object_type)
+            references.append({
+                "object_type": adt_type,
+                "type": adt_type,
+                "name": self._adt_object_name(object_type, object_name),
+                "resolved_name": object_name.upper(),
+                "uri": uri,
+            })
         if not references:
             raise ValidationError("At least one object is required")
         body = self._object_references_xml(references)
@@ -62,39 +96,113 @@ class AdtActivationMixin:
             root = ET.fromstring(xml_text)
         except (ET.ParseError, TypeError):
             return self._activation_fallback_results(references, "Could not parse activation result")
-        messages = [
-            self._activation_message(element)
-            for element in root.iter()
-            if self._xml_local_name(element.tag) in {"msg", "message"}
-        ]
-        messages = [m for m in messages if m]
+
+        # Collect all messages from known activation message tags
+        messages = self._collect_activation_messages(root)
         error_types = {"A", "E", "X", "ERROR"}
-        has_errors = any(
-            (m.get("type") or m.get("severity") or "").upper() in error_types for m in messages)
-        has_failed_state = any(
-            (e.attrib.get("state") or self._activation_attr(e, "state")).upper() in error_types
-            for e in root.iter())
-        activation_executed = not any(
-            self._xml_local_name(e.tag) == "properties"
-            and (e.attrib.get("activationExecuted") or "").lower() == "false"
-            for e in root.iter())
-        all_activated = activation_executed and not has_errors and not has_failed_state
-        state = "S" if all_activated else "E"
-        state_text = "Activated" if all_activated else "Activation failed"
+
+        # Check per-object activation state from atom:entry elements
+        # Use local-name matching to be robust against namespace prefix variations
+        per_object_states: dict[str, dict[str, Any]] = {}
+        for element in root.iter():
+            if self._xml_local_name(element.tag) != "entry":
+                continue
+            entry_title = ""
+            for child in element:
+                if self._xml_local_name(child.tag) == "title" and child.text:
+                    entry_title = child.text.strip().upper()
+                if self._xml_local_name(child.tag) == "content":
+                    # Content may have nested properties
+                    for inner in child.iter():
+                        if self._xml_local_name(inner.tag) == "properties":
+                            exec_attr = inner.attrib.get("activationExecuted", "")
+                            per_object_states.setdefault(entry_title, {})["activation_executed"] = exec_attr
+                        if self._xml_local_name(inner.tag) == "message":
+                            sev = inner.attrib.get("severity", inner.attrib.get("type", ""))
+                            txt = inner.text or ""
+                            per_object_states.setdefault(entry_title, {}).setdefault("messages", []).append(
+                                {"severity": sev, "text": txt})
+            if entry_title and entry_title not in per_object_states:
+                # Also check root-level properties elements
+                pass
+
+        # Build per-reference results
         object_results = []
         for ref in references:
+            ref_name = ref.get("resolved_name", ref["name"]).upper()
+            obj_state = per_object_states.get(ref_name, {})
+
+            # Messages related to this object
             related = [
                 m for m in messages
-                if len(references) == 1 or ref["uri"] in (m.get("href") or "") or ref["name"] in (m.get("objDescr") or "").upper()
+                if ref_name in (m.get("objDescr", "") or "").upper()
+                or ref_name in (m.get("name", "") or "").upper()
             ]
+            if not related and not obj_state.get("messages"):
+                related = messages  # only one object — all messages apply
+
+            # Determine activation state
+            exec_flag = obj_state.get("activation_executed", "").lower()
+            if exec_flag == "false":
+                obj_activated = False
+                state = "E"
+                state_text = "Activation failed"
+            elif exec_flag == "true":
+                obj_activated = True
+                state = "S"
+                state_text = "Activated"
+            elif any(
+                (m.get("severity") or m.get("type") or "").upper() in error_types
+                for m in related
+            ):
+                obj_activated = False
+                state = "E"
+                state_text = "Activation failed"
+            else:
+                obj_activated = not any(
+                    (m.get("severity") or m.get("type") or "").upper() in error_types
+                    for m in related
+                )
+                state = "S" if obj_activated else "E"
+                state_text = "Activated" if obj_activated else "Activation failed"
+                if not related and not obj_state:
+                    state_text += " (no confirmation — may be false positive)"
+
             object_results.append({
                 "object_type": ref["object_type"], "name": ref["name"],
                 "state": state, "state_text": state_text,
-                "activated": all_activated and not any(
-                    (m.get("type") or "").upper() in error_types for m in related),
+                "activated": obj_activated,
                 "messages": related,
             })
-        return object_results, all(r["activated"] for r in object_results)
+
+        all_activated = all(r["activated"] for r in object_results)
+        return object_results, all_activated
+
+    def _collect_activation_messages(self, root: ET.Element) -> list[dict[str, Any]]:
+        """Collect activation messages from all known XML structures."""
+        messages: list[dict[str, Any]] = []
+        seen = set()
+        for element in root.iter():
+            tag = self._xml_local_name(element.tag)
+            if tag in {"msg", "message", "error"}:
+                msg = self._activation_message(element)
+                key = (msg.get("text", ""), msg.get("severity", ""), msg.get("type", ""))
+                if key not in seen:
+                    seen.add(key)
+                    messages.append(msg)
+            # Also collect text from properties sub-elements
+            if tag == "properties":
+                for child in element:
+                    child_tag = self._xml_local_name(child.tag)
+                    if child_tag in {"messages", "errors"}:
+                        for sub in child:
+                            sub_msg = self._activation_message(sub)
+                            if sub_msg:
+                                key = (sub_msg.get("text", ""),)
+                                if key not in seen:
+                                    seen.add(key)
+                                    messages.append(sub_msg)
+        return messages
 
     def _activation_fallback_results(self, references: list[dict[str, str]], state_text: str) -> tuple[list[dict[str, Any]], bool]:
         return [

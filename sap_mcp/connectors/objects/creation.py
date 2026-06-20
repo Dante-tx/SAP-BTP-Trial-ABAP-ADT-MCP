@@ -356,6 +356,8 @@ class AdtCreationMixin(LockMixin, BaseMixin):
             return object_name
         if normalized_type in {"prog", "program", "prog/p", "report"}:
             return f"REPORT {object_name.lower()}.\n"
+        if normalized_type in {"fugr", "fugr/f", "function_group"}:
+            return ""
         if normalized_type in {"func", "function_module", "fugr/ff"}:
             return ""
         if normalized_type in {"tabl", "table"}:

@@ -18,13 +18,16 @@ class AdtWhereUsedMixin:
 
         ADT: GET /sap/bc/adt/repository/whereused?objectName={name}&objectType={type}
         """
-        object_name = name.strip().upper()
+        resolved_name = await self._resolve_repository_object_name(object_type, name)
+        object_name = (resolved_name or name).strip().upper()
         if not object_name:
             raise ValidationError("name is required")
+        adt_object_type = self._adt_object_type(object_type)
+        adt_object_name = self._adt_object_name(object_type, object_name)
 
         params: dict[str, str] = {
-            "objectName": object_name,
-            "objectType": object_type.upper(),
+            "objectName": adt_object_name,
+            "objectType": adt_object_type,
         }
         if enable_all_types:
             params["enableAllTypes"] = "true"
@@ -39,18 +42,21 @@ class AdtWhereUsedMixin:
         except SapBackendError as error:
             if error.details.get("status_code") != 404:
                 raise
-            return await self._where_used_source_fallback(object_type.upper(), object_name, enable_all_types)
+            return await self._where_used_source_fallback(adt_object_type, adt_object_name, enable_all_types)
 
         references, total = self._parse_where_used(response.text)
-        return {
-            "object_type": object_type.upper(),
-            "name": object_name,
+        result = {
+            "object_type": adt_object_type,
+            "name": adt_object_name,
             "enable_all_types": enable_all_types,
             "references": references,
             "total_references": total,
             "status_code": response.status_code,
             "source": "adt_whereused",
         }
+        if object_name != adt_object_name:
+            result["resolved_name"] = object_name
+        return result
 
     async def _where_used_source_fallback(
         self,
