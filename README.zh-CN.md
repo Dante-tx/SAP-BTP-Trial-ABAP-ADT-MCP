@@ -1,6 +1,6 @@
 # SAP ABAP ADT MCP Server
 
-通过 ADT HTTP API 为 AI 代理提供操作 SAP ABAP Development Tools 的 MCP 服务端。提供 24 个工具，覆盖完整的 ABAP 开发生命周期。
+通过 ADT HTTP API 为 AI 代理提供操作 SAP ABAP Development Tools 的 MCP 服务端。提供 27 个工具，覆盖完整的 ABAP 开发生命周期。
 
 ## 运行要求
 
@@ -49,7 +49,7 @@ HTTP 端点：
 - `/healthz`
 - `/logon/success`
 
-## MCP 工具（24 个）
+## MCP 工具（27 个）
 
 ### 会话与系统
 
@@ -84,6 +84,8 @@ HTTP 端点：
 | `abap_creation_info` | 查看/验证创建元数据 | `action`（list_types/type_details/validate）、`destination`、`object_type` |
 | `abap_activate` | 激活一个或多个 ABAP 对象 | `object_type`、`name`、`objects[]`、`reason` |
 | `abap_delete_object` | 删除 ABAP 仓库对象 | `object_type`、`name`、`reason`、`etag`、`transport_request_number` |
+| `abap_lock` | 锁定 ABAP 对象以供编辑 | `object_url`、`is_creation` |
+| `abap_unlock` | 释放 ABAP 对象锁定 | `lock_handle`、`object_url` |
 
 ### 传输
 
@@ -199,7 +201,7 @@ SAP-ABAP-ADT-MCP/
 │   │   └── system/           # 系统信息
 │   ├── services/             # ABAP Dev Gateway
 │   ├── tools/                # MCP 工具工作流
-│   ├── mcp_server.py         # MCP 工具定义（17 个工具）
+│   ├── mcp_server.py         # MCP 工具定义（27 个工具）
 │   └── server.py             # HTTP/STDIO 服务入口
 ├── sap-mcp.example.yaml      # 示例配置
 ├── pyproject.toml            # Python 项目元数据
