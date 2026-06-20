@@ -1,5 +1,5 @@
 server:
-  name: "SAP BTP Trial ABAP ADT MCP Server"
+  name: "SAP ABAP ADT MCP Server"
   auth_tokens:
     - "dev-token"
 
