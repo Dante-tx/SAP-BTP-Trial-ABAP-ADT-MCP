@@ -367,10 +367,13 @@ class AdtHttpMixin:
 
         Returns (response, etag_source) where etag_source indicates how the etag was obtained.
         """
+        # SAP ADT uses raw (unquoted) ETag values (see hana1909.http: If-Match: 20210220150417).
+        # _if_match_etag wrapping with double-quotes per RFC 7232 breaks ADT's If-Match check.
+        # Use request_etag directly; wildcard "*" is still valid.
         request_etag = initial_etag or "*"
         etag_source = initial_etag_source or ("provided" if initial_etag else "wildcard")
         merged_headers = dict(headers or {})
-        merged_headers["If-Match"] = self._if_match_etag(request_etag)
+        merged_headers["If-Match"] = request_etag
 
         for attempt in range(max_retries + 1):
             try:
@@ -388,8 +391,13 @@ class AdtHttpMixin:
                 server_etag = error.details.get("server_etag") or self._server_etag_from_precondition(str(error))
                 if not server_etag:
                     continue
-                merged_headers["If-Match"] = self._if_match_etag(server_etag)
-                etag_source = "server_retry" if attempt == 0 else f"server_retry_{attempt + 1}"
+                # SAP ADT uses raw ETag; try raw first, then quoted as fallback
+                if attempt == 0:
+                    merged_headers["If-Match"] = server_etag
+                    etag_source = "server_retry_raw"
+                else:
+                    merged_headers["If-Match"] = self._if_match_etag(server_etag)
+                    etag_source = "server_retry_quoted"
 
         raise SapBackendError("Max ETag retries exceeded")
 

@@ -1,6 +1,6 @@
 # SAP ABAP ADT MCP Server
 
-MCP (Model Context Protocol) server for AI agents to interact with SAP ABAP systems via ADT HTTP APIs. Provides 24 tools covering the full ABAP development lifecycle.
+MCP (Model Context Protocol) server for AI agents to interact with SAP ABAP systems via ADT HTTP APIs. Provides 27 tools covering the full ABAP development lifecycle.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ HTTP endpoints:
 - `/healthz`
 - `/logon/success`
 
-## MCP Tools (24)
+## MCP Tools (27)
 
 ### Session & System
 
@@ -72,6 +72,7 @@ HTTP endpoints:
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
 | `abap_read_source` | Read ABAP source code | `object_type`, `name`, `scope` (main/include/active/inactive/both), `include_type`, `uri` |
+| `abap_describe_signature` | Describe ABAP object method signatures | `object_type`, `name`, `method_name` |
 | `abap_update_source` | Update ABAP source code | `object_type`, `name`, `source`, `include_type`, `etag`, `reason`, `transport_request_number` |
 | `abap_syntax_check` | Run syntax check on source (no activation) | `object_type`, `name`, `source` |
 | `abap_code_assist` | Code assistance — element info or format | `action` (element_info/format), `object_type`, `object_name`, `source`, `position` |
@@ -84,6 +85,8 @@ HTTP endpoints:
 | `abap_creation_info` | Inspect/validate creation metadata | `action` (list_types/type_details/validate), `destination`, `object_type` |
 | `abap_activate` | Activate one or more ABAP objects | `object_type`, `name`, `objects[]`, `reason` |
 | `abap_delete_object` | Delete an ABAP repository object | `object_type`, `name`, `reason`, `etag`, `transport_request_number` |
+| `abap_lock` | Lock an ABAP object for editing | `object_url`, `is_creation` |
+| `abap_unlock` | Release an ABAP object lock | `lock_handle`, `object_url` |
 
 ### Transport
 
@@ -194,12 +197,12 @@ SAP-ABAP-ADT-MCP/
 │   │   ├── analysis/         # CDS analysis, code assist
 │   │   ├── core/             # HTTP, auth, paths, XML utils
 │   │   ├── integration/      # Business services, destinations, generators
-│   │   ├── lifecycle/        # Activation, quality, syntax check, transport
+│   │   ├── lifecycle/        # Activation, lock, quality, syntax check, transport
 │   │   ├── objects/          # CRUD, search, execution, function modules
 │   │   └── system/           # System info
 │   ├── services/             # ABAP Dev Gateway
 │   ├── tools/                # MCP tool workflows
-│   ├── mcp_server.py         # MCP tool definitions (17 tools)
+│   ├── mcp_server.py         # MCP tool definitions (27 tools total)
 │   └── server.py             # HTTP/STDIO server entry points
 ├── sap-mcp.example.yaml      # Example configuration
 ├── pyproject.toml            # Python project metadata
