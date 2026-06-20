@@ -9,19 +9,19 @@ ADT_BASE_PATH = "/sap/bc/adt"
 # WARNING: Keep in sync with the alias list in ADT_PATH_REGISTRATIONS
 SUPPORTED_TYPES_HELP = (
     "Supported object types are class, interface, ddls/cds, dcls/dcl, bdef, "
-    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, fugr, and func"
+    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, incl, fugr, and func"
 )
 SUPPORTED_SOURCE_TYPES_HELP = (
     "Supported source types are class, interface, ddls/cds, dcls/dcl, bdef, "
-    "ddlx, srvd, tabl, dtel, doma, devc, srvb, prog, fugr, and func"
+    "ddlx, srvd, tabl, dtel, doma, devc, srvb, prog, incl, fugr, and func"
 )
 SUPPORTED_SEARCH_TYPES_HELP = (
     "Supported search types are class, interface, ddls/cds, dcls/dcl, bdef, "
-    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, fugr, and func"
+    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, incl, fugr, and func"
 )
 SUPPORTED_WRITABLE_TYPES_HELP = (
     "Writable types are class, interface, ddls/cds, dcls/dcl, bdef, "
-    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, fugr, and func"
+    "ddlx, srvd, srvb, tabl, dtel, doma, devc, prog, incl, fugr, and func"
 )
 
 # Default language version for ABAP Cloud Development
@@ -263,12 +263,22 @@ ADT_PATH_REGISTRATIONS = (
         create_accept="application/vnd.sap.adt.programs.programs.v2+xml, application/xml, */*",
     ),
     AdtPathRegistration(
+        "INCL",
+        frozenset({"incl", "progi", "prog_i", "prog/i", "include"}),
+        "/sap/bc/adt/programs/includes/{name}",
+        "source/main",
+        "source/main",
+        "source",
+        "PROG",
+        collection_template="/sap/bc/adt/programs/includes",
+    ),
+    AdtPathRegistration(
         "FUGR",
         frozenset({"fugr", "fugr/f", "function_group"}),
         "/sap/bc/adt/functions/groups/{name}",
         "source/main",
-        None,
-        "metadata",
+        "source/main",
+        "source",
         "FUGR",
         collection_template="/sap/bc/adt/functions/groups",
         create_xml_name="group:abapFunctionGroup",
